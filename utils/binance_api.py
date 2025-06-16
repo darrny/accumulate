@@ -88,6 +88,30 @@ class BinanceAPI:
             logger.error(f"Error placing limit order for {pair}: {e}")
             raise
 
+    def place_market_order(self, pair: str, quantity: float, side: str = 'BUY') -> Dict[str, Any]:
+        """
+        Place a market order on Binance.
+        Args:
+            pair: Trading pair (e.g., 'UNIUSDT')
+            quantity: Order quantity
+            side: 'BUY' or 'SELL'
+        Returns:
+            Order response from Binance
+        """
+        try:
+            params = {
+                'symbol': pair,
+                'side': side,
+                'type': 'MARKET',
+                'quantity': quantity
+            }
+            order = self.client.create_order(**params)
+            logger.info(f"Placed {side} market order for {quantity} {pair}")
+            return order
+        except BinanceAPIException as e:
+            logger.error(f"Error placing market order for {pair}: {e}")
+            raise
+
     def cancel_order(self, pair: str, order_id: int) -> Dict[str, Any]:
         """
         Cancel an existing order.

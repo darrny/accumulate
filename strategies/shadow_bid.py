@@ -1,4 +1,5 @@
 import time
+import random
 import logging
 from typing import Optional
 from utils.binance_api import BinanceAPI
@@ -18,6 +19,18 @@ class ShadowBidStrategy:
         self.current_order_id: Optional[int] = None
         self.is_running = False
         self.config = SHADOW_BID
+        self.last_order_time = 0
+        
+    def _get_cooldown_time(self) -> float:
+        """
+        Get the cooldown time with random jitter.
+        
+        Returns:
+            Cooldown time in seconds
+        """
+        base_time = self.config['cooldown_time']
+        jitter = random.uniform(-self.config['jitter'], self.config['jitter'])
+        return max(1.0, base_time + jitter)  # Ensure minimum 1 second
         
     def _place_shadow_order(self, price: float) -> None:
         """
@@ -27,6 +40,14 @@ class ShadowBidStrategy:
             price: Price to place the order at
         """
         try:
+            current_time = time.time()
+            time_since_last_order = current_time - self.last_order_time
+            
+            # Check if cooldown period has elapsed
+            if time_since_last_order < self._get_cooldown_time():
+                logger.info(f"Cooldown in effect, waiting before placing new order")
+                return
+                
             # Cancel existing order if it exists
             if self.current_order_id is not None:
                 try:
@@ -46,6 +67,7 @@ class ShadowBidStrategy:
             )
             
             self.current_order_id = order['orderId']
+            self.last_order_time = current_time
             logger.info(f"Placed new shadow bid order {self.current_order_id} at {price}")
             
         except Exception as e:
@@ -76,6 +98,7 @@ class ShadowBidStrategy:
             return
             
         self.is_running = True
+        self.last_order_time = 0
         logger.info("Starting shadow bid strategy")
         
         while self.is_running:

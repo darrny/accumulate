@@ -53,7 +53,7 @@ class BinanceAPI:
             raise
 
     def place_limit_order(self, pair: str, price: float, quantity: float, 
-                         side: str = 'BUY') -> Dict[str, Any]:
+                         side: str = 'BUY', post_only: bool = False) -> Dict[str, Any]:
         """
         Place a limit order on Binance.
         
@@ -62,19 +62,26 @@ class BinanceAPI:
             price: Limit price
             quantity: Order quantity
             side: 'BUY' or 'SELL'
+            post_only: Whether to make this a post-only order
             
         Returns:
             Order response from Binance
         """
         try:
-            order = self.client.create_order(
-                symbol=pair,
-                side=side,
-                type='LIMIT',
-                timeInForce='GTC',
-                quantity=quantity,
-                price=price
-            )
+            params = {
+                'symbol': pair,
+                'side': side,
+                'type': 'LIMIT',
+                'timeInForce': 'GTC',
+                'quantity': quantity,
+                'price': price
+            }
+            
+            if post_only:
+                params['newOrderRespType'] = 'RESULT'
+                params['newClientOrderId'] = f'post_only_{int(time.time() * 1000)}'
+            
+            order = self.client.create_order(**params)
             logger.info(f"Placed {side} limit order for {quantity} {pair} at {price}")
             return order
         except BinanceAPIException as e:

@@ -40,7 +40,7 @@ def test_binance_api():
         # 4. Test placing a limit order (small amount)
         print("\n4. Testing place_limit_order...")
         # Place a limit buy order slightly below current price
-        test_price = float(best_bid) * 0.99  # 1% below best bid
+        test_price = float(best_bid) * 1  # 1% below best bid
         test_quantity = 0.001  # Small amount for testing
         order = api.place_limit_order(
             pair=test_pair,

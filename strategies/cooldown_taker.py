@@ -1,148 +1,120 @@
+import logging
 import time
 import random
-import logging
 from typing import Optional, Tuple
 from utils.binance_api import BinanceAPI
-from config import COOLDOWN_TAKER, TRADING_PAIR
+from config import TRADING_PAIR, COOLDOWN_TAKER
+from .base_strategy import BaseStrategy
 
-logger = logging.getLogger('cooldown_taker')
+logger = logging.getLogger(__name__)
 
-class CooldownTakerStrategy:
+class CooldownTakerStrategy(BaseStrategy):
     def __init__(self, api: BinanceAPI):
-        """
-        Initialize the cooldown taker strategy.
-        
-        Args:
-            api: BinanceAPI instance for making trades
-        """
-        self.api = api
-        self.is_running = False
+        super().__init__(api)
         self.config = COOLDOWN_TAKER
         self.last_order_time = 0
         
     def _get_cooldown_time(self) -> float:
         """
-        Get the cooldown time with random jitter.
-        
-        Returns:
-            Cooldown time in seconds
+        Get cooldown time with jitter.
         """
         base_time = self.config['cooldown_time']
-        jitter = random.uniform(-self.config['jitter'], self.config['jitter'])
-        return max(1.0, base_time + jitter)  # Ensure minimum 1 second
+        jitter = self.config['jitter']
+        return base_time + random.uniform(-jitter, jitter)
         
-    def _get_best_ask_info(self) -> Tuple[float, float]:
+    def _should_place_order(self, ask_price: float, ask_quantity: float) -> bool:
         """
-        Get the best ask price and quantity.
-        
-        Returns:
-            Tuple of (price, quantity)
+        Check if we should place an order based on price and quantity.
         """
-        try:
-            orderbook = self.api.get_orderbook(TRADING_PAIR, limit=1)
-            best_ask_price = float(orderbook['asks'][0][0])
-            best_ask_quantity = float(orderbook['asks'][0][1])
-            return best_ask_price, best_ask_quantity
-        except Exception as e:
-            logger.error(f"Error getting best ask info: {e}")
-            raise
-        
-    def _should_place_order(self, price: float, quantity: float) -> bool:
-        """
-        Determine if we should place an order based on current market conditions.
-        
-        Args:
-            price: Current best ask price
-            quantity: Current best ask quantity
-            
-        Returns:
-            True if we should place an order, False otherwise
-        """
-        # Check if price is within our maximum
-        if self.config['max_price'] is not None and price > self.config['max_price']:
-            logger.info(f"Best ask {price} exceeds max price {self.config['max_price']}")
+        # Check if price is within our limit
+        if self.config['max_price'] is not None and ask_price > self.config['max_price']:
             return False
             
-        # Check if quantity is below our maximum threshold
-        if quantity > self.config['max_ask_quantity']:
-            logger.info(f"Best ask quantity {quantity} is above maximum threshold {self.config['max_ask_quantity']}")
+        # Check if quantity is below our maximum
+        if ask_quantity > self.config['max_ask_quantity']:
             return False
             
         return True
         
     def _calculate_order_quantity(self, ask_quantity: float) -> float:
         """
-        Calculate the quantity for our order based on the ask quantity.
-        
-        Args:
-            ask_quantity: Current best ask quantity
-            
-        Returns:
-            Quantity for our order
+        Calculate the order quantity based on the ask quantity.
         """
-        # Multiply the ask quantity by our multiplier
-        target_quantity = ask_quantity * self.config['order_multiplier']
+        # Calculate quantity based on multiplier
+        quantity = ask_quantity * self.config['order_multiplier']
         
         # Cap at maximum order quantity
-        return min(target_quantity, self.config['max_order_quantity'])
+        if self.config['max_order_quantity'] is not None:
+            quantity = min(quantity, self.config['max_order_quantity'])
+            
+        return quantity
         
     def _place_taker_order(self) -> None:
         """
-        Place a limit order to take the best ask.
+        Place a taker order.
         """
         try:
-            # Get current best ask info
-            best_ask_price, best_ask_quantity = self._get_best_ask_info()
-            
-            # Check if we should place an order
-            if not self._should_place_order(best_ask_price, best_ask_quantity):
+            # Get current best ask
+            orderbook = self.api.get_orderbook(TRADING_PAIR, limit=1)
+            if not orderbook['asks']:
                 return
                 
-            # Calculate our order quantity
-            order_quantity = self._calculate_order_quantity(best_ask_quantity)
+            ask_price = float(orderbook['asks'][0][0])
+            ask_quantity = float(orderbook['asks'][0][1])
+            
+            # Check if we should place an order
+            if not self._should_place_order(ask_price, ask_quantity):
+                return
+                
+            # Calculate order quantity
+            order_qty = self._calculate_order_quantity(ask_quantity)
+            
+            # Round price and quantity
+            rounded_price = self.round_price(ask_price)
+            rounded_qty = self.round_quantity(order_qty)
             
             # Place limit order
             order = self.api.place_limit_order(
                 pair=TRADING_PAIR,
-                price=best_ask_price,
-                quantity=order_quantity,
+                price=rounded_price,
+                quantity=rounded_qty,
                 side='BUY',
-                post_only=False  # We want to take liquidity
+                post_only=False  # We want to be a taker
             )
             
-            logger.info(f"Placed taker order at {best_ask_price} for {order_quantity} {TRADING_PAIR}")
+            logger.info(f"Placed taker order at {rounded_price} for {rounded_qty} {TRADING_PAIR}")
             self.last_order_time = time.time()
             
         except Exception as e:
             logger.error(f"Error placing taker order: {e}")
-    
-    def start(self) -> None:
-        """Start the cooldown taker strategy."""
-        if not self.config['enabled']:
-            logger.info("Cooldown taker strategy is disabled")
-            return
             
-        self.is_running = True
-        self.last_order_time = 0
+    def start(self) -> None:
+        """
+        Start the strategy.
+        """
         logger.info("Starting cooldown taker strategy")
+        self.running = True
         
-        while self.is_running:
+        while self.running:
             try:
-                current_time = time.time()
-                time_since_last_order = current_time - self.last_order_time
+                # Check if we're in cooldown
+                if time.time() - self.last_order_time < self._get_cooldown_time():
+                    time.sleep(1)
+                    continue
+                    
+                # Try to place an order
+                self._place_taker_order()
                 
-                # Check if cooldown period has elapsed
-                if time_since_last_order >= self._get_cooldown_time():
-                    self._place_taker_order()
-                
-                # Sleep for a short time to prevent excessive API calls
+                # Sleep to avoid hitting rate limits
                 time.sleep(1)
                 
             except Exception as e:
                 logger.error(f"Error in cooldown taker strategy: {e}")
                 time.sleep(1)
-    
+                
     def stop(self) -> None:
-        """Stop the cooldown taker strategy."""
-        self.is_running = False
+        """
+        Stop the strategy.
+        """
         logger.info("Stopping cooldown taker strategy")
+        self.running = False

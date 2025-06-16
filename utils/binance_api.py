@@ -167,3 +167,17 @@ class BinanceAPI:
         except BinanceAPIException as e:
             logger.error(f"Error getting orderbook for {pair}: {e}")
             raise
+
+    def get_exchange_info(self) -> Dict:
+        """
+        Get exchange information including trading rules and filters.
+        
+        Returns:
+            Dict containing exchange information
+        """
+        try:
+            response = self.client.get_exchange_info()
+            return response
+        except Exception as e:
+            logger.error(f"Error getting exchange info: {e}")
+            raise

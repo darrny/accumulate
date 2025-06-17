@@ -83,7 +83,6 @@ class BinanceAPI:
                 params['newClientOrderId'] = f'post_only_{int(time.time() * 1000)}'
             
             order = self.client.create_order(**params)
-            logger.info(f"Placed {side} limit order for {quantity} {pair} at {price}")
             return order
         except BinanceAPIException as e:
             logger.error(f"Error placing limit order for {pair}: {e}")

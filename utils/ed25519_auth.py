@@ -46,18 +46,14 @@ class UserDataStream:
                 'params': params
             }
             
-            print(f"Sending auth request: {auth_request}")  # Debug log
-            
             # Send authentication request
             self.ws.send(json.dumps(auth_request))
             auth_response = json.loads(self.ws.recv())
-            print(f"Auth response: {auth_response}")  # Debug log
             
             if auth_response.get('status') != 200:
                 raise Exception(f"Authentication failed: {auth_response}")
                 
             self.authenticated = True
-            print("WebSocket authenticated successfully")
             
             # Subscribe to user data stream
             subscribe_request = {
@@ -65,20 +61,14 @@ class UserDataStream:
                 'method': 'userDataStream.subscribe'
             }
             
-            print(f"Sending subscribe request: {subscribe_request}")  # Debug log
-            
             # Send subscription request
             self.ws.send(json.dumps(subscribe_request))
             subscribe_response = json.loads(self.ws.recv())
-            print(f"Subscribe response: {subscribe_response}")  # Debug log
             
             if subscribe_response.get('status') != 200:
                 raise Exception(f"Failed to subscribe to user data stream: {subscribe_response}")
                 
-            print("Successfully subscribed to user data stream")
-            
         except Exception as e:
-            print(f"Authentication error: {e}")
             self.authenticated = False
             raise
             
@@ -88,7 +78,6 @@ class UserDataStream:
             try:
                 # Create new WebSocket connection
                 self.ws = create_connection('wss://ws-api.testnet.binance.vision/ws-api/v3')
-                print("WebSocket connection opened")
                 
                 # Authenticate and subscribe
                 self.authenticate()
@@ -98,7 +87,6 @@ class UserDataStream:
                     try:
                         message = self.ws.recv()
                         data = json.loads(message)
-                        print(f"Received message: {data}")  # Debug log
                         
                         # Handle ping messages
                         if isinstance(data, dict) and data.get('method') == 'ping':
@@ -114,11 +102,10 @@ class UserDataStream:
                             self.callback(data)
                             
                     except Exception as e:
-                        print(f"Error handling message: {e}")
                         break
                         
             except Exception as e:
-                print(f"WebSocket error: {e}")
+                pass
                 
             finally:
                 if self.ws:

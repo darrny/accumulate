@@ -3,6 +3,7 @@ import time
 import sys
 import json
 import uuid
+import threading
 from typing import Dict, Optional
 from binance.client import Client
 from binance import ThreadedWebsocketManager
@@ -26,6 +27,7 @@ class TradingMonitor:
     def __init__(self, api: BinanceAPI):
         self.api = api
         self.strategies = {}
+        self.strategy_threads = {}  # Store strategy threads
         self.orderbook = {'bids': [], 'asks': []}
         self.last_trade = None
         self.running = False
@@ -34,18 +36,24 @@ class TradingMonitor:
         self.conn_key = None
         self.user_stream = None
         
-        # Track acquisition metrics
-        self.acquired_quantity = 0.0
+        # Track weighted average price
         self.total_cost = 0.0
-        self.average_price = 0.0
+        self.filled_quantity = 0.0  # Track quantity from filled orders
+        self.weighted_avg_price = 0.0
         
         # Initialize strategies if enabled
+        logger.info(f"{Colors.BOLD}Initializing strategies...{Colors.ENDC}")
         if SHADOW_BID['enabled']:
+            logger.info(f"{Colors.BOLD}Initializing Shadow Bid strategy...{Colors.ENDC}")
             self.strategies['shadow_bid'] = ShadowBidStrategy(api)
         if COOLDOWN_TAKER['enabled']:
+            logger.info(f"{Colors.BOLD}Initializing Cooldown Taker strategy...{Colors.ENDC}")
             self.strategies['cooldown_taker'] = CooldownTakerStrategy(api)
         if BIG_FISH['enabled']:
+            logger.info(f"{Colors.BOLD}Initializing Big Fish strategy...{Colors.ENDC}")
             self.strategies['big_fish'] = BigFishStrategy(api)
+        
+        logger.info(f"{Colors.BOLD}Initialized {len(self.strategies)} strategies: {', '.join(self.strategies.keys())}{Colors.ENDC}")
             
     def _get_current_quantity(self) -> float:
         """Get current quantity of the base asset (e.g., BTC)."""
@@ -65,7 +73,13 @@ class TradingMonitor:
         """Check if we've reached our target quantity."""
         current_quantity = self._get_current_quantity()
         remaining = self.target_quantity - current_quantity
-        logger.info(f"{Colors.BOLD}{Colors.BLUE}Progress: {current_quantity:.8f} / {self.target_quantity:.8f} BTC (Remaining: {remaining:.8f} BTC){Colors.ENDC}")
+        
+        # Calculate remaining cost based on weighted average price
+        remaining_cost = remaining * self.weighted_avg_price if self.weighted_avg_price > 0 else 0
+        
+        logger.info(f"{Colors.BOLD}{Colors.MAGENTA}Progress: {current_quantity:.8f} / {self.target_quantity:.8f} BTC (Remaining: {remaining:.8f} BTC){Colors.ENDC}")
+        logger.info(f"{Colors.BOLD}{Colors.MAGENTA}Average Entry: {self.weighted_avg_price:.2f} USDT (Remaining Cost: {remaining_cost:.2f} USDT){Colors.ENDC}")
+        
         return current_quantity >= self.target_quantity
             
     def _handle_orderbook_update(self, msg: Dict) -> None:
@@ -117,24 +131,25 @@ class TradingMonitor:
             
             # Handle execution report
             if event.get('e') == 'executionReport':
-                # Update acquisition metrics for filled orders
+                # Check for insufficient funds error
+                if event.get('X') == 'REJECTED' and 'insufficient balance' in event.get('r', '').lower():
+                    logger.error(f"{Colors.RED}Insufficient funds error detected. Stopping all strategies...{Colors.ENDC}")
+                    self._handle_insufficient_funds()
+                    return
+                
+                # Update weighted average price for filled buy orders
                 if event['X'] == 'FILLED' and event['S'] == 'BUY':
                     quantity = float(event['q'])
                     price = float(event['p'])
                     cost = quantity * price
                     
-                    # Update metrics
-                    self.acquired_quantity += quantity
+                    # Update total cost and filled quantity
                     self.total_cost += cost
-                    self.average_price = self.total_cost / self.acquired_quantity if self.acquired_quantity > 0 else 0
+                    self.filled_quantity += quantity
                     
-                    # Log acquisition with color
-                    logger.info(f"\n{Colors.BOLD}{Colors.GREEN}=== Acquisition Update ==={Colors.ENDC}")
-                    logger.info(f"{Colors.GREEN}Filled: {quantity:.8f} BTC @ {price:.2f} USDT{Colors.ENDC}")
-                    logger.info(f"{Colors.GREEN}Total Acquired: {self.acquired_quantity:.8f} / {self.target_quantity:.8f} BTC{Colors.ENDC}")
-                    logger.info(f"{Colors.GREEN}Average Price: {self.average_price:.2f} USDT{Colors.ENDC}")
-                    logger.info(f"{Colors.GREEN}Remaining Cost: {(self.target_quantity - self.acquired_quantity) * self.average_price:.2f} USDT{Colors.ENDC}")
-                    logger.info(f"{Colors.GREEN}========================={Colors.ENDC}")
+                    # Calculate weighted average price using filled quantity
+                    if self.filled_quantity > 0:
+                        self.weighted_avg_price = self.total_cost / self.filled_quantity
                 
                 # Log the execution report with strategy color
                 strategy = event.get('c', '').split('_')[0]  # Extract strategy name from client order ID
@@ -159,8 +174,33 @@ class TradingMonitor:
                 sys.exit(0)
                 
         except Exception as e:
-            logger.error(f"Error handling balance update: {e}")
-            logger.error(f"Message: {msg}")
+            logger.error(f"{Colors.RED}Error handling balance update: {e}{Colors.ENDC}")
+            
+    def _handle_insufficient_funds(self) -> None:
+        """Handle insufficient funds error by stopping all strategies and canceling orders."""
+        try:
+            # Cancel all open orders
+            open_orders = self.api.get_open_orders(TRADING_PAIR)
+            for order in open_orders:
+                try:
+                    self.api.cancel_order(TRADING_PAIR, order['orderId'])
+                    logger.info(f"{Colors.YELLOW}Cancelled order {order['orderId']}{Colors.ENDC}")
+                except Exception as e:
+                    logger.error(f"{Colors.RED}Error cancelling order {order['orderId']}: {e}{Colors.ENDC}")
+            
+            # Stop all strategies
+            for name, strategy in self.strategies.items():
+                color = STRATEGY_COLORS.get(name, Colors.ENDC)
+                logger.info(f"{color}Stopping {name} strategy due to insufficient funds...{Colors.ENDC}")
+                strategy.stop()
+            
+            # Stop the monitor
+            self.stop()
+            sys.exit(1)
+            
+        except Exception as e:
+            logger.error(f"{Colors.RED}Error handling insufficient funds: {e}{Colors.ENDC}")
+            sys.exit(1)
             
     def start(self) -> None:
         """Start monitoring with WebSocket."""
@@ -226,14 +266,35 @@ class TradingMonitor:
                 logger.error(f"{Colors.RED}This might be due to invalid API keys or insufficient permissions{Colors.ENDC}")
                 logger.info(f"{Colors.YELLOW}Continuing without user data stream...{Colors.ENDC}")
             
-            # Start strategies
+            # Start strategies in separate threads
+            logger.info(f"{Colors.BOLD}Starting {len(self.strategies)} strategies in separate threads...{Colors.ENDC}")
             for name, strategy in self.strategies.items():
                 color = STRATEGY_COLORS.get(name, Colors.ENDC)
-                logger.info(f"{color}Starting {name} strategy...{Colors.ENDC}")
-                strategy.start()
-                
+                logger.info(f"{color}Starting {name} strategy thread...{Colors.ENDC}")
+                try:
+                    # Create and start thread for this strategy
+                    thread = threading.Thread(target=strategy.start, name=f"{name}_thread")
+                    thread.daemon = True  # Thread will exit when main thread exits
+                    thread.start()
+                    self.strategy_threads[name] = thread
+                    logger.info(f"{color}{name} strategy thread started successfully{Colors.ENDC}")
+                except Exception as e:
+                    logger.error(f"{Colors.RED}Failed to start {name} strategy thread: {str(e)}{Colors.ENDC}")
+            
             # Keep the main thread alive
             while self.running:
+                # Check if any strategy threads have died
+                for name, thread in list(self.strategy_threads.items()):
+                    if not thread.is_alive():
+                        logger.error(f"{Colors.RED}{name} strategy thread died unexpectedly{Colors.ENDC}")
+                        # Restart the thread
+                        color = STRATEGY_COLORS.get(name, Colors.ENDC)
+                        logger.info(f"{color}Restarting {name} strategy thread...{Colors.ENDC}")
+                        new_thread = threading.Thread(target=self.strategies[name].start, name=f"{name}_thread")
+                        new_thread.daemon = True
+                        new_thread.start()
+                        self.strategy_threads[name] = new_thread
+                        logger.info(f"{color}{name} strategy thread restarted successfully{Colors.ENDC}")
                 time.sleep(1)
                 
         except KeyboardInterrupt:
@@ -250,10 +311,23 @@ class TradingMonitor:
         self.running = False
         
         # Stop strategies
+        logger.info(f"{Colors.BOLD}Stopping {len(self.strategies)} strategies...{Colors.ENDC}")
         for name, strategy in self.strategies.items():
             color = STRATEGY_COLORS.get(name, Colors.ENDC)
             logger.info(f"{color}Stopping {name} strategy...{Colors.ENDC}")
-            strategy.stop()
+            try:
+                strategy.stop()
+                logger.info(f"{color}{name} strategy stopped successfully{Colors.ENDC}")
+            except Exception as e:
+                logger.error(f"{Colors.RED}Failed to stop {name} strategy: {str(e)}{Colors.ENDC}")
+        
+        # Wait for strategy threads to finish
+        for name, thread in self.strategy_threads.items():
+            if thread.is_alive():
+                logger.info(f"{Colors.YELLOW}Waiting for {name} strategy thread to finish...{Colors.ENDC}")
+                thread.join(timeout=5)  # Wait up to 5 seconds for thread to finish
+                if thread.is_alive():
+                    logger.warning(f"{Colors.YELLOW}{name} strategy thread did not finish gracefully{Colors.ENDC}")
             
         # Stop WebSocket connections if they were initialized
         if self.twm is not None:

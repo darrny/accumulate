@@ -9,29 +9,11 @@ from binance import ThreadedWebsocketManager
 from binance import AsyncClient, BinanceSocketManager
 from utils.binance_api import BinanceAPI
 from utils.ed25519_auth import get_user_data_stream, close_user_data_stream
+from utils.colors import Colors, STRATEGY_COLORS
 from config import TRADING_PAIR, SHADOW_BID, COOLDOWN_TAKER, BIG_FISH, TARGET_QUANTITY, BINANCE_API_KEY, BINANCE_API_SECRET, USE_TESTNET
 from strategies.shadow_bid import ShadowBidStrategy
 from strategies.cooldown_taker import CooldownTakerStrategy
 from strategies.big_fish import BigFishStrategy
-
-# ANSI color codes
-class Colors:
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-
-# Strategy colors
-STRATEGY_COLORS = {
-    'shadow_bid': Colors.CYAN,
-    'cooldown_taker': Colors.YELLOW,
-    'big_fish': Colors.GREEN
-}
 
 # Configure logging
 logging.basicConfig(
@@ -92,20 +74,20 @@ class TradingMonitor:
             # Update orderbook
             self.orderbook['bids'] = [(float(price), float(qty)) for price, qty in msg['b']]
             self.orderbook['asks'] = [(float(price), float(qty)) for price, qty in msg['a']]
-            
-            # Only log orderbook state if cooldown_taker or big_fish strategies are active
-            if (COOLDOWN_TAKER['enabled'] or BIG_FISH['enabled']) and self.orderbook['bids'] and self.orderbook['asks']:
-                logger.info(f"\n{Colors.BOLD}=== Current Orderbook State ==={Colors.ENDC}")
-                logger.info(f"{Colors.BOLD}Top 5 Bids:{Colors.ENDC}")
-                for price, qty in self.orderbook['bids'][:5]:
-                    logger.info(f"  {price:.2f} USDT - {qty:.8f} BTC")
-                logger.info(f"\n{Colors.BOLD}Top 5 Asks:{Colors.ENDC}")
-                for price, qty in self.orderbook['asks'][:5]:
-                    logger.info(f"  {price:.2f} USDT - {qty:.8f} BTC")
-                logger.info(f"{Colors.BOLD}============================={Colors.ENDC}")
-                
         except Exception as e:
             logger.error(f"Error handling orderbook update: {e}")
+
+    def _log_orderbook_state(self) -> None:
+        """Log the current orderbook state."""
+        if self.orderbook['bids'] and self.orderbook['asks']:
+            logger.info(f"\n{Colors.BOLD}=== Current Orderbook State ==={Colors.ENDC}")
+            logger.info(f"{Colors.BOLD}Top 5 Bids:{Colors.ENDC}")
+            for price, qty in self.orderbook['bids'][:5]:
+                logger.info(f"  {price:.2f} USDT - {qty:.8f} BTC")
+            logger.info(f"\n{Colors.BOLD}Top 5 Asks:{Colors.ENDC}")
+            for price, qty in self.orderbook['asks'][:5]:
+                logger.info(f"  {price:.2f} USDT - {qty:.8f} BTC")
+            logger.info(f"{Colors.BOLD}============================={Colors.ENDC}")
             
     def _handle_trade_update(self, msg: Dict) -> None:
         """Handle trade update from WebSocket."""

@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 from utils.binance_api import BinanceAPI
 from config import TRADING_PAIR, BIG_FISH, MAX_PRICE
 from .base_strategy import BaseStrategy
+from utils.colors import Colors
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,10 @@ class BigFishStrategy(BaseStrategy):
             if not self._should_place_order(ask_price, ask_quantity):
                 return
                 
+            # Log orderbook before placing order
+            logger.info(f"\n{Colors.BOLD}=== Before Placing Big Fish Order ==={Colors.ENDC}")
+            self._log_orderbook_state()
+            
             # Calculate order quantity
             order_qty = self._calculate_order_quantity(ask_quantity)
             
@@ -82,12 +87,30 @@ class BigFishStrategy(BaseStrategy):
                 post_only=False  # We want to be a taker
             )
             
-            logger.info(f"Placed taker order at {rounded_price} for {rounded_qty} {TRADING_PAIR}")
+            logger.info(f"{Colors.GREEN}Placed big fish order at {rounded_price} for {rounded_qty} {TRADING_PAIR}{Colors.ENDC}")
             self.last_order_time = time.time()
+            
+            # Log orderbook after placing order
+            logger.info(f"\n{Colors.BOLD}=== After Placing Big Fish Order ==={Colors.ENDC}")
+            self._log_orderbook_state()
             
         except Exception as e:
             logger.error(f"Error placing taker order: {e}")
             
+    def _log_orderbook_state(self) -> None:
+        """Log the current orderbook state."""
+        try:
+            orderbook = self.api.get_orderbook(TRADING_PAIR, limit=5)
+            logger.info(f"{Colors.BOLD}Top 5 Bids:{Colors.ENDC}")
+            for price, qty in orderbook['bids'][:5]:
+                logger.info(f"  {float(price):.2f} USDT - {float(qty):.8f} BTC")
+            logger.info(f"\n{Colors.BOLD}Top 5 Asks:{Colors.ENDC}")
+            for price, qty in orderbook['asks'][:5]:
+                logger.info(f"  {float(price):.2f} USDT - {float(qty):.8f} BTC")
+            logger.info(f"{Colors.BOLD}============================={Colors.ENDC}")
+        except Exception as e:
+            logger.error(f"Error logging orderbook state: {e}")
+        
     def start(self) -> None:
         """
         Start the strategy.

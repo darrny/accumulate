@@ -3,8 +3,9 @@ import time
 import random
 from typing import Optional, Tuple
 from utils.binance_api import BinanceAPI
-from config import TRADING_PAIR, COOLDOWN_TAKER, MAX_PRICE
+from config import TRADING_PAIR, COOLDOWN_TAKER, MAX_PRICE, TARGET_QUANTITY
 from .base_strategy import BaseStrategy
+from utils.colors import Colors
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +31,8 @@ class CooldownTakerStrategy(BaseStrategy):
         if ask_price > MAX_PRICE:
             return False
             
-        # Check if quantity is below our minimum taker quantity
-        if ask_quantity < self.config['min_taker_quantity']:
+        # Check if best ask quantity is below our maximum threshold
+        if ask_quantity > self.config['max_ask1_quantity']:
             return False
             
         return True
@@ -40,18 +41,17 @@ class CooldownTakerStrategy(BaseStrategy):
         """
         Calculate the order quantity based on the ask quantity.
         """
-        # Calculate quantity based on multiplier
-        quantity = ask_quantity * self.config['order_multiplier']
+        # Calculate quantity as 20% of target quantity
+        quantity = self.config['max_order_quantity']
         
-        # Cap at maximum order quantity
-        if self.config['max_order_quantity'] is not None:
-            quantity = min(quantity, self.config['max_order_quantity'])
-            
+        # Ensure we don't exceed the ask quantity
+        quantity = min(quantity, ask_quantity)
+        
         return quantity
         
     def _place_taker_order(self) -> None:
         """
-        Place a taker order.
+        Place a taker order at the best ask price if conditions are met.
         """
         try:
             # Get current best ask
@@ -66,6 +66,10 @@ class CooldownTakerStrategy(BaseStrategy):
             if not self._should_place_order(ask_price, ask_quantity):
                 return
                 
+            # Log orderbook before placing order
+            logger.info(f"\n{Colors.BOLD}=== Before Placing Cooldown Taker Order ==={Colors.ENDC}")
+            self._log_orderbook_state()
+            
             # Calculate order quantity
             order_qty = self._calculate_order_quantity(ask_quantity)
             
@@ -73,7 +77,7 @@ class CooldownTakerStrategy(BaseStrategy):
             rounded_price = self.round_price(ask_price)
             rounded_qty = self.round_quantity(order_qty)
             
-            # Place limit order
+            # Place limit order at best ask price
             order = self.api.place_limit_order(
                 pair=TRADING_PAIR,
                 price=rounded_price,
@@ -82,12 +86,30 @@ class CooldownTakerStrategy(BaseStrategy):
                 post_only=False  # We want to be a taker
             )
             
-            logger.info(f"Placed taker order at {rounded_price} for {rounded_qty} {TRADING_PAIR}")
+            logger.info(f"{Colors.YELLOW}Placed taker order at {rounded_price} for {rounded_qty} {TRADING_PAIR}{Colors.ENDC}")
             self.last_order_time = time.time()
+            
+            # Log orderbook after placing order
+            logger.info(f"\n{Colors.BOLD}=== After Placing Cooldown Taker Order ==={Colors.ENDC}")
+            self._log_orderbook_state()
             
         except Exception as e:
             logger.error(f"Error placing taker order: {e}")
             
+    def _log_orderbook_state(self) -> None:
+        """Log the current orderbook state."""
+        try:
+            orderbook = self.api.get_orderbook(TRADING_PAIR, limit=5)
+            logger.info(f"{Colors.BOLD}Top 5 Bids:{Colors.ENDC}")
+            for price, qty in orderbook['bids'][:5]:
+                logger.info(f"  {float(price):.2f} USDT - {float(qty):.8f} BTC")
+            logger.info(f"\n{Colors.BOLD}Top 5 Asks:{Colors.ENDC}")
+            for price, qty in orderbook['asks'][:5]:
+                logger.info(f"  {float(price):.2f} USDT - {float(qty):.8f} BTC")
+            logger.info(f"{Colors.BOLD}============================={Colors.ENDC}")
+        except Exception as e:
+            logger.error(f"Error logging orderbook state: {e}")
+        
     def start(self) -> None:
         """
         Start the strategy.

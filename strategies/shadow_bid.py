@@ -43,7 +43,7 @@ class ShadowBidStrategy(BaseStrategy):
                 return
                 
             # Calculate order quantity
-            order_qty = best_bid_qty * self.config['quantity_multiplier']
+            order_qty = self._calculate_order_quantity(best_bid_qty)
             
             # Round price and quantity
             rounded_price = self.round_price(shadow_price)
@@ -64,6 +64,21 @@ class ShadowBidStrategy(BaseStrategy):
         except Exception as e:
             logger.error(f"Error placing shadow order: {e}")
             
+    def _calculate_order_quantity(self, best_bid_qty: float) -> float:
+        """
+        Calculate the order quantity based on the best bid quantity.
+        """
+        # Calculate quantity based on multiplier
+        quantity = best_bid_qty * self.config['quantity_multiplier']
+        
+        # Cap at maximum order quantity
+        quantity = min(quantity, self.config['max_order_quantity'])
+        
+        # Ensure quantity is properly formatted (no scientific notation)
+        quantity = float(f"{quantity:.8f}")
+        
+        return quantity
+        
     def start(self) -> None:
         """
         Start the strategy.

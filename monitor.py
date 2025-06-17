@@ -4,6 +4,8 @@ import sys
 import json
 import uuid
 import threading
+import importlib.util
+import os
 from typing import Dict, Optional
 from binance.client import Client
 from binance import ThreadedWebsocketManager
@@ -23,6 +25,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def load_strategy_config():
+    """Load strategy configuration from StrategyConfig.py"""
+    try:
+        spec = importlib.util.spec_from_file_location("strategy_config", "StrategyConfig.py")
+        if spec is None or spec.loader is None:
+            raise ImportError("Could not load StrategyConfig.py")
+        strategy_config = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(strategy_config)
+        return strategy_config
+    except Exception as e:
+        logger.error(f"{Colors.RED}Error loading strategy config: {e}{Colors.ENDC}")
+        return None
+
 class TradingMonitor:
     def __init__(self, api: BinanceAPI):
         self.api = api
@@ -35,25 +50,80 @@ class TradingMonitor:
         self.twm = None
         self.conn_key = None
         self.user_stream = None
+        self.last_config_check = 0
+        self.config_check_interval = 10  # Check config every 10 seconds
         
         # Track weighted average price
         self.total_cost = 0.0
         self.filled_quantity = 0.0  # Track quantity from filled orders
         self.weighted_avg_price = 0.0
         
-        # Initialize strategies if enabled
-        logger.info(f"{Colors.BOLD}Initializing strategies...{Colors.ENDC}")
-        if SHADOW_BID['enabled']:
-            logger.info(f"{Colors.BOLD}Initializing Shadow Bid strategy...{Colors.ENDC}")
-            self.strategies['shadow_bid'] = ShadowBidStrategy(api)
-        if COOLDOWN_TAKER['enabled']:
-            logger.info(f"{Colors.BOLD}Initializing Cooldown Taker strategy...{Colors.ENDC}")
-            self.strategies['cooldown_taker'] = CooldownTakerStrategy(api)
-        if BIG_FISH['enabled']:
-            logger.info(f"{Colors.BOLD}Initializing Big Fish strategy...{Colors.ENDC}")
-            self.strategies['big_fish'] = BigFishStrategy(api)
+        # Initialize strategies based on initial config
+        self._update_strategies()
         
-        logger.info(f"{Colors.BOLD}Initialized {len(self.strategies)} strategies: {', '.join(self.strategies.keys())}{Colors.ENDC}")
+    def _update_strategies(self) -> None:
+        """Update strategies based on current configuration"""
+        try:
+            # Load current strategy config
+            config = load_strategy_config()
+            if config is None:
+                return
+                
+            # Check each strategy
+            for name, strategy_class, config_dict in [
+                ('shadow_bid', ShadowBidStrategy, SHADOW_BID),
+                ('cooldown_taker', CooldownTakerStrategy, COOLDOWN_TAKER),
+                ('big_fish', BigFishStrategy, BIG_FISH)
+            ]:
+                should_be_running = getattr(config, name.upper(), False)
+                is_running = name in self.strategies
+                
+                # If strategy should be running but isn't
+                if should_be_running and not is_running:
+                    logger.info(f"{Colors.BOLD}Initializing {name} strategy...{Colors.ENDC}")
+                    self.strategies[name] = strategy_class(self.api, monitor=self)
+                    if self.running:  # Only start if monitor is running
+                        self._start_strategy(name)
+                        
+                # If strategy shouldn't be running but is
+                elif not should_be_running and is_running:
+                    logger.info(f"{Colors.BOLD}Stopping {name} strategy...{Colors.ENDC}")
+                    self._stop_strategy(name)
+                    del self.strategies[name]
+                    
+        except Exception as e:
+            logger.error(f"{Colors.RED}Error updating strategies: {e}{Colors.ENDC}")
+            
+    def _start_strategy(self, name: str) -> None:
+        """Start a strategy in its own thread"""
+        try:
+            color = STRATEGY_COLORS.get(name, Colors.ENDC)
+            logger.info(f"{color}Starting {name} strategy thread...{Colors.ENDC}")
+            thread = threading.Thread(target=self.strategies[name].start, name=f"{name}_thread")
+            thread.daemon = True
+            thread.start()
+            self.strategy_threads[name] = thread
+            logger.info(f"{color}{name} strategy thread started successfully{Colors.ENDC}")
+        except Exception as e:
+            logger.error(f"{Colors.RED}Failed to start {name} strategy thread: {str(e)}{Colors.ENDC}")
+            
+    def _stop_strategy(self, name: str) -> None:
+        """Stop a strategy and its thread"""
+        try:
+            color = STRATEGY_COLORS.get(name, Colors.ENDC)
+            logger.info(f"{color}Stopping {name} strategy...{Colors.ENDC}")
+            self.strategies[name].stop()
+            
+            # Wait for thread to finish
+            if name in self.strategy_threads:
+                thread = self.strategy_threads[name]
+                if thread.is_alive():
+                    thread.join(timeout=5)
+                del self.strategy_threads[name]
+                
+            logger.info(f"{color}{name} strategy stopped successfully{Colors.ENDC}")
+        except Exception as e:
+            logger.error(f"{Colors.RED}Failed to stop {name} strategy: {str(e)}{Colors.ENDC}")
             
     def _get_current_quantity(self) -> float:
         """Get current quantity of the base asset (e.g., BTC)."""
@@ -266,35 +336,26 @@ class TradingMonitor:
                 logger.error(f"{Colors.RED}This might be due to invalid API keys or insufficient permissions{Colors.ENDC}")
                 logger.info(f"{Colors.YELLOW}Continuing without user data stream...{Colors.ENDC}")
             
-            # Start strategies in separate threads
-            logger.info(f"{Colors.BOLD}Starting {len(self.strategies)} strategies in separate threads...{Colors.ENDC}")
-            for name, strategy in self.strategies.items():
-                color = STRATEGY_COLORS.get(name, Colors.ENDC)
-                logger.info(f"{color}Starting {name} strategy thread...{Colors.ENDC}")
-                try:
-                    # Create and start thread for this strategy
-                    thread = threading.Thread(target=strategy.start, name=f"{name}_thread")
-                    thread.daemon = True  # Thread will exit when main thread exits
-                    thread.start()
-                    self.strategy_threads[name] = thread
-                    logger.info(f"{color}{name} strategy thread started successfully{Colors.ENDC}")
-                except Exception as e:
-                    logger.error(f"{Colors.RED}Failed to start {name} strategy thread: {str(e)}{Colors.ENDC}")
+            # Start initial strategies
+            for name in self.strategies:
+                self._start_strategy(name)
             
             # Keep the main thread alive
             while self.running:
+                # Check if it's time to reload strategy config
+                current_time = time.time()
+                if current_time - self.last_config_check >= self.config_check_interval:
+                    self._update_strategies()
+                    self.last_config_check = current_time
+                    
                 # Check if any strategy threads have died
                 for name, thread in list(self.strategy_threads.items()):
                     if not thread.is_alive():
                         logger.error(f"{Colors.RED}{name} strategy thread died unexpectedly{Colors.ENDC}")
-                        # Restart the thread
-                        color = STRATEGY_COLORS.get(name, Colors.ENDC)
-                        logger.info(f"{color}Restarting {name} strategy thread...{Colors.ENDC}")
-                        new_thread = threading.Thread(target=self.strategies[name].start, name=f"{name}_thread")
-                        new_thread.daemon = True
-                        new_thread.start()
-                        self.strategy_threads[name] = new_thread
-                        logger.info(f"{color}{name} strategy thread restarted successfully{Colors.ENDC}")
+                        # Restart the thread if the strategy is still enabled
+                        if name in self.strategies:
+                            self._start_strategy(name)
+                            
                 time.sleep(1)
                 
         except KeyboardInterrupt:
@@ -310,24 +371,9 @@ class TradingMonitor:
         logger.info(f"{Colors.YELLOW}Stopping monitor...{Colors.ENDC}")
         self.running = False
         
-        # Stop strategies
-        logger.info(f"{Colors.BOLD}Stopping {len(self.strategies)} strategies...{Colors.ENDC}")
-        for name, strategy in self.strategies.items():
-            color = STRATEGY_COLORS.get(name, Colors.ENDC)
-            logger.info(f"{color}Stopping {name} strategy...{Colors.ENDC}")
-            try:
-                strategy.stop()
-                logger.info(f"{color}{name} strategy stopped successfully{Colors.ENDC}")
-            except Exception as e:
-                logger.error(f"{Colors.RED}Failed to stop {name} strategy: {str(e)}{Colors.ENDC}")
-        
-        # Wait for strategy threads to finish
-        for name, thread in self.strategy_threads.items():
-            if thread.is_alive():
-                logger.info(f"{Colors.YELLOW}Waiting for {name} strategy thread to finish...{Colors.ENDC}")
-                thread.join(timeout=5)  # Wait up to 5 seconds for thread to finish
-                if thread.is_alive():
-                    logger.warning(f"{Colors.YELLOW}{name} strategy thread did not finish gracefully{Colors.ENDC}")
+        # Stop all strategies
+        for name in list(self.strategies.keys()):
+            self._stop_strategy(name)
             
         # Stop WebSocket connections if they were initialized
         if self.twm is not None:

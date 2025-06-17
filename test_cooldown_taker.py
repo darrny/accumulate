@@ -18,11 +18,11 @@ def print_orderbook_state(api: BinanceAPI, depth: int = 3):
         print("\n=== Current Orderbook State ===")
         print("Top Bids:")
         for price, quantity in orderbook['bids'][:depth]:
-            print(f"  Price: {float(price):.2f}, Quantity: {float(quantity):.4f}")
+            print(f"  Price: {float(price):.8f}, Quantity: {float(quantity):.4f}")
             
         print("\nTop Asks:")
         for price, quantity in orderbook['asks'][:depth]:
-            print(f"  Price: {float(price):.2f}, Quantity: {float(quantity):.4f}")
+            print(f"  Price: {float(price):.8f}, Quantity: {float(quantity):.4f}")
         print("=============================\n")
         
     except Exception as e:

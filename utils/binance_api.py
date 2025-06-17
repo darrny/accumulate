@@ -184,10 +184,15 @@ class BinanceAPI:
             limit: Number of orders to retrieve (max 5000)
             
         Returns:
-            Orderbook data from Binance
+            Orderbook data from Binance with preserved string precision
         """
         try:
-            return self.client.get_order_book(symbol=pair, limit=limit)
+            orderbook = self.client.get_order_book(symbol=pair, limit=limit)
+            # Keep the values as strings to preserve precision
+            return {
+                'bids': [[price, qty] for price, qty in orderbook['bids']],
+                'asks': [[price, qty] for price, qty in orderbook['asks']]
+            }
         except BinanceAPIException as e:
             logger.error(f"Error getting orderbook for {pair}: {e}")
             return {'bids': [], 'asks': []}

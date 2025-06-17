@@ -5,7 +5,7 @@ import uuid
 import threading
 from websocket import create_connection
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
-from config import BINANCE_TESTNET_ED_KEY
+from config import PROD_ED_KEY
 
 def load_private_key():
     """Load the private key from the PEM file."""
@@ -35,7 +35,7 @@ class UserDataStream:
             # Prepare authentication parameters
             params = {
                 'timestamp': timestamp,
-                'apiKey': BINANCE_TESTNET_ED_KEY,
+                'apiKey': PROD_ED_KEY,
             }
             params['signature'] = sign_request(params, private_key)
             

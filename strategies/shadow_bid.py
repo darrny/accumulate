@@ -1,10 +1,10 @@
 import logging
 import time
 import random
-from typing import Optional
+from typing import Optional, Dict
 from utils.binance_api import BinanceAPI
 from utils.colors import Colors
-from config import TRADING_PAIR, SHADOW_BID, MAX_PRICE, TARGET_QUANTITY
+from config import TRADING_PAIR, SHADOW_BID, MAX_PRICE, TARGET_QUANTITY, BASE, QUOTE
 from .base_strategy import BaseStrategy
 
 logger = logging.getLogger(__name__)
@@ -29,24 +29,47 @@ class ShadowBidStrategy(BaseStrategy):
         Get the remaining quantity we need to acquire.
         """
         try:
-            current_quantity = float(self.api.get_account_balance('BTC').get('free', 0))
+            current_quantity = float(self.api.get_account_balance(BASE).get('free', 0))
             remaining = TARGET_QUANTITY - current_quantity
             return max(0, remaining)
         except Exception as e:
             logger.error(f"{Colors.RED}Error getting remaining quantity: {e}{Colors.ENDC}")
             return 0
         
-    def _calculate_order_quantity(self) -> float:
-        """
-        Calculate the order quantity based on percentage of remaining target.
-        """
-        remaining = self._get_remaining_quantity()
-        if remaining <= 0:
-            return 0
+    def _calculate_order_quantity(self, orderbook: Dict) -> float:
+        """Calculate the quantity for our shadow bid order."""
+        try:
+            # Get the best bid and ask
+            best_bid = float(orderbook['bids'][0][0]) if orderbook['bids'] else 0
+            best_bid_qty = float(orderbook['bids'][0][1]) if orderbook['bids'] else 0
+            best_ask = float(orderbook['asks'][0][0]) if orderbook['asks'] else 0
+            best_ask_qty = float(orderbook['asks'][0][1]) if orderbook['asks'] else 0
             
-        # Calculate order size as percentage of remaining target
-        order_size = remaining * self.config['order_size_percentage']
-        return self.round_quantity(order_size)
+            # Calculate our order quantity based on the best bid quantity
+            quantity = best_bid_qty * self.config['quantity_multiplier']
+            
+            # Also consider the ask side if enabled
+            if self.config['min_ask_quantity'] > 0 and best_ask_qty >= self.config['min_ask_quantity']:
+                ask_based_quantity = best_ask_qty * self.config['order_multiplier']
+                quantity = max(quantity, ask_based_quantity)
+            
+            # Calculate percentage-based quantity
+            remaining = self.get_remaining_quantity()
+            percentage_quantity = remaining * self.config['order_size_percentage']
+            
+            # Use the smaller of the two quantities
+            quantity = min(quantity, percentage_quantity)
+            
+            # Apply maximum order size limit
+            max_order_size = self.config.get('max_order_size', float('inf'))
+            quantity = min(quantity, max_order_size)
+            
+            # Round to appropriate decimal places
+            return self.round_quantity(quantity)
+            
+        except Exception as e:
+            logger.error(f"{Colors.RED}Error calculating order quantity: {str(e)}{Colors.ENDC}")
+            return 0.0
         
     def _cancel_existing_order(self) -> None:
         """Cancel any existing shadow order."""
@@ -69,7 +92,7 @@ class ShadowBidStrategy(BaseStrategy):
                 return
                 
             # Calculate order quantity
-            quantity = self._calculate_order_quantity()
+            quantity = self._calculate_order_quantity(self.api.get_orderbook(TRADING_PAIR))
             if quantity <= 0:
                 return
                 
@@ -94,7 +117,7 @@ class ShadowBidStrategy(BaseStrategy):
             # Store order ID
             self.current_order_id = order['orderId']
             
-            logger.info(f"{Colors.CYAN}Placed shadow order at {price} for {quantity} {TRADING_PAIR}{Colors.ENDC}")
+            logger.info(f"{Colors.CYAN}Placed shadow order at {price} {QUOTE} for {quantity} {BASE}{Colors.ENDC}")
             self.last_order_time = time.time()
             
         except Exception as e:
@@ -104,7 +127,7 @@ class ShadowBidStrategy(BaseStrategy):
         """
         Start the strategy.
         """
-        logger.info(f"{Colors.CYAN}Starting shadow bid strategy{Colors.ENDC}")
+        logger.info(f"{Colors.CYAN}Starting shadow bid strategy for {TRADING_PAIR}{Colors.ENDC}")
         self.running = True
         
         while self.running:
@@ -131,3 +154,41 @@ class ShadowBidStrategy(BaseStrategy):
         logger.info(f"{Colors.CYAN}Stopping shadow bid strategy{Colors.ENDC}")
         self.running = False
         self._cancel_existing_order()
+
+    def _place_bid_order(self) -> None:
+        """Place a shadow bid order."""
+        try:
+            # Get current orderbook
+            orderbook = self.api.get_orderbook(TRADING_PAIR)
+            if not orderbook['bids'] or not orderbook['asks']:
+                return
+                
+            # Calculate order quantity
+            quantity = self._calculate_order_quantity(orderbook)
+            if quantity <= 0:
+                return
+                
+            # Get best bid price and adjust if needed
+            best_bid = float(orderbook['bids'][0][0])
+            price = best_bid * (1 - self.config['price_multiplier'])
+            rounded_price = self.round_price(price)
+            
+            # Place limit order
+            order = self.api.place_limit_order(
+                pair=TRADING_PAIR,
+                price=rounded_price,
+                quantity=quantity,
+                side='BUY',
+                post_only=True  # We want to be a maker
+            )
+            
+            # Update acquired quantity if in standalone mode
+            if self.monitor is None:
+                self.update_acquired_quantity(quantity)
+            
+            logger.info(f"{Colors.CYAN}Placed shadow bid at {rounded_price} for {quantity} {TRADING_PAIR}{Colors.ENDC}")
+            
+            self.last_order_time = time.time()
+            
+        except Exception as e:
+            logger.error(f"{Colors.RED}Error placing shadow bid: {str(e)}{Colors.ENDC}")

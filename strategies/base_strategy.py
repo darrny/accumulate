@@ -2,14 +2,17 @@ from abc import ABC, abstractmethod
 from typing import Dict, Optional, Tuple
 import logging
 from utils.binance_api import BinanceAPI
-from config import TRADING_PAIR
+from config import TRADING_PAIR, TARGET_QUANTITY, BASE, QUOTE
+from utils.colors import Colors
 
 logger = logging.getLogger(__name__)
 
 class BaseStrategy(ABC):
-    def __init__(self, api: BinanceAPI):
+    def __init__(self, api: BinanceAPI, monitor=None):
         self.api = api
+        self.monitor = monitor
         self.running = False
+        self.last_order_time = 0
         self._trading_pair_info = None
         self._quantity_precision = None
         self._price_precision = None
@@ -19,6 +22,7 @@ class BaseStrategy(ABC):
         self._min_price = None
         self._max_price = None
         self._tick_size = None
+        self._acquired_quantity = 0.0  # Track acquired quantity for standalone mode
         
     def _get_trading_pair_info(self) -> Optional[Dict]:
         """Get and cache trading pair information."""
@@ -47,9 +51,9 @@ class BaseStrategy(ABC):
                         self._tick_size = float(filter['tickSize'])
                         self._price_precision = len(str(self._tick_size).rstrip('0').split('.')[-1])
                 
-                logger.info(f"Trading pair info loaded:")
-                logger.info(f"  Quantity - Min: {self._min_qty}, Max: {self._max_qty}, Step: {self._step_size}, Precision: {self._quantity_precision}")
-                logger.info(f"  Price - Min: {self._min_price}, Max: {self._max_price}, Tick: {self._tick_size}, Precision: {self._price_precision}")
+                logger.info(f"Trading pair info loaded for {TRADING_PAIR}:")
+                logger.info(f"  {BASE} - Min: {self._min_qty}, Max: {self._max_qty}, Step: {self._step_size}, Precision: {self._quantity_precision}")
+                logger.info(f"  {QUOTE} - Min: {self._min_price}, Max: {self._max_price}, Tick: {self._tick_size}, Precision: {self._price_precision}")
                 
             except Exception as e:
                 logger.error(f"Error getting trading pair info: {e}")
@@ -58,61 +62,35 @@ class BaseStrategy(ABC):
         return self._trading_pair_info
         
     def round_quantity(self, quantity: float) -> float:
-        """Round quantity to appropriate precision and ensure it meets LOT_SIZE filter requirements."""
+        """Round quantity to appropriate decimal places."""
         if self._quantity_precision is None:
             self._get_trading_pair_info()
-        if self._quantity_precision is None:
-            logger.error("Could not determine quantity precision")
-            return quantity
-            
-        # Ensure it's within min/max bounds
-        if self._min_qty is not None:
-            quantity = max(quantity, self._min_qty)
-        if self._max_qty is not None:
-            quantity = min(quantity, self._max_qty)
-            
-        # Ensure it's a multiple of step size
-        if self._step_size is not None:
-            # Calculate how many steps we need
-            steps = round(quantity / self._step_size)
-            # Convert back to quantity
-            quantity = steps * self._step_size
-            # Format to the correct precision
-            quantity = float(f"{quantity:.{self._quantity_precision}f}")
-            
-        return quantity
+        return round(quantity, self._quantity_precision) if self._quantity_precision is not None else quantity
         
     def round_price(self, price: float) -> float:
-        """Round price to appropriate precision and ensure it meets PRICE_FILTER requirements."""
+        """Round price to appropriate decimal places."""
         if self._price_precision is None:
             self._get_trading_pair_info()
-        if self._price_precision is None:
-            logger.error("Could not determine price precision")
-            return price
+        return round(price, self._price_precision) if self._price_precision is not None else price
+        
+    def get_remaining_quantity(self) -> float:
+        """Get remaining quantity to acquire."""
+        if self.monitor is not None:
+            return self.monitor.get_remaining_quantity()
+        else:
+            # Standalone mode: use local tracking
+            return max(0, TARGET_QUANTITY - self._acquired_quantity)
             
-        # Ensure it's within min/max bounds
-        if self._min_price is not None:
-            price = max(price, self._min_price)
-        if self._max_price is not None:
-            price = min(price, self._max_price)
-            
-        # Ensure it's a multiple of tick size
-        if self._tick_size is not None:
-            # Calculate how many ticks we need
-            ticks = round(price / self._tick_size)
-            # Convert back to price
-            price = ticks * self._tick_size
-            # Format to the correct precision
-            price = float(f"{price:.{self._price_precision}f}")
-            
-        return price
+    def update_acquired_quantity(self, quantity: float) -> None:
+        """Update the acquired quantity (for standalone mode)."""
+        self._acquired_quantity += quantity
         
     @abstractmethod
     def start(self) -> None:
         """Start the strategy."""
-        pass
+        self.running = True
         
     @abstractmethod
     def stop(self) -> None:
         """Stop the strategy."""
-        pass
+        self.running = False

@@ -1,14 +1,37 @@
 import logging
 import time
 import sys
+import json
+import uuid
 from typing import Dict, Optional
 from binance.client import Client
 from binance import ThreadedWebsocketManager
+from binance import AsyncClient, BinanceSocketManager
 from utils.binance_api import BinanceAPI
+from utils.ed25519_auth import get_user_data_stream, close_user_data_stream
 from config import TRADING_PAIR, SHADOW_BID, COOLDOWN_TAKER, BIG_FISH, TARGET_QUANTITY, BINANCE_API_KEY, BINANCE_API_SECRET, USE_TESTNET
 from strategies.shadow_bid import ShadowBidStrategy
 from strategies.cooldown_taker import CooldownTakerStrategy
 from strategies.big_fish import BigFishStrategy
+
+# ANSI color codes
+class Colors:
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+# Strategy colors
+STRATEGY_COLORS = {
+    'shadow_bid': Colors.CYAN,
+    'cooldown_taker': Colors.YELLOW,
+    'big_fish': Colors.GREEN
+}
 
 # Configure logging
 logging.basicConfig(
@@ -27,6 +50,12 @@ class TradingMonitor:
         self.target_quantity = TARGET_QUANTITY
         self.twm = None
         self.conn_key = None
+        self.user_stream = None
+        
+        # Track acquisition metrics
+        self.acquired_quantity = 0.0
+        self.total_cost = 0.0
+        self.average_price = 0.0
         
         # Initialize strategies if enabled
         if SHADOW_BID['enabled']:
@@ -53,7 +82,8 @@ class TradingMonitor:
     def _check_target_reached(self) -> bool:
         """Check if we've reached our target quantity."""
         current_quantity = self._get_current_quantity()
-        logger.info(f"Current quantity: {current_quantity:.8f} / Target: {self.target_quantity:.8f}")
+        remaining = self.target_quantity - current_quantity
+        logger.info(f"{Colors.BOLD}{Colors.BLUE}Progress: {current_quantity:.8f} / {self.target_quantity:.8f} BTC (Remaining: {remaining:.8f} BTC){Colors.ENDC}")
         return current_quantity >= self.target_quantity
             
     def _handle_orderbook_update(self, msg: Dict) -> None:
@@ -63,17 +93,16 @@ class TradingMonitor:
             self.orderbook['bids'] = [(float(price), float(qty)) for price, qty in msg['b']]
             self.orderbook['asks'] = [(float(price), float(qty)) for price, qty in msg['a']]
             
-            # Log top of book
-            if self.orderbook['bids'] and self.orderbook['asks']:
-                best_bid = self.orderbook['bids'][0]
-                best_ask = self.orderbook['asks'][0]
-                spread = best_ask[0] - best_bid[0]
-                spread_pct = (spread / best_bid[0]) * 100
-                
-                logger.info(f"\nOrderbook Update:")
-                logger.info(f"Best Bid: {best_bid[0]:.2f} ({best_bid[1]:.4f})")
-                logger.info(f"Best Ask: {best_ask[0]:.2f} ({best_ask[1]:.4f})")
-                logger.info(f"Spread: {spread:.2f} ({spread_pct:.3f}%)")
+            # Only log orderbook state if cooldown_taker or big_fish strategies are active
+            if (COOLDOWN_TAKER['enabled'] or BIG_FISH['enabled']) and self.orderbook['bids'] and self.orderbook['asks']:
+                logger.info(f"\n{Colors.BOLD}=== Current Orderbook State ==={Colors.ENDC}")
+                logger.info(f"{Colors.BOLD}Top 5 Bids:{Colors.ENDC}")
+                for price, qty in self.orderbook['bids'][:5]:
+                    logger.info(f"  {price:.2f} USDT - {qty:.8f} BTC")
+                logger.info(f"\n{Colors.BOLD}Top 5 Asks:{Colors.ENDC}")
+                for price, qty in self.orderbook['asks'][:5]:
+                    logger.info(f"  {price:.2f} USDT - {qty:.8f} BTC")
+                logger.info(f"{Colors.BOLD}============================={Colors.ENDC}")
                 
         except Exception as e:
             logger.error(f"Error handling orderbook update: {e}")
@@ -89,17 +118,9 @@ class TradingMonitor:
                 'is_buyer_maker': msg['m']
             }
             
-            # Only log trades above a certain quantity threshold
-            if self.last_trade['quantity'] >= 0.1:  # Only log trades >= 0.1 BTC
-                side = "SELL" if self.last_trade['is_buyer_maker'] else "BUY"
-                logger.info(f"\nTrade Update (Large Trade):")
-                logger.info(f"Price: {self.last_trade['price']:.2f}")
-                logger.info(f"Quantity: {self.last_trade['quantity']:.4f}")
-                logger.info(f"Side: {side}")
-            
             # Check if we've reached target
             if self._check_target_reached():
-                logger.info("Target quantity reached! Stopping all strategies...")
+                logger.info(f"{Colors.BOLD}{Colors.GREEN}Target quantity reached! Stopping all strategies...{Colors.ENDC}")
                 self.stop()
                 sys.exit(0)
                 
@@ -109,37 +130,95 @@ class TradingMonitor:
     def _handle_balance_update(self, msg: Dict) -> None:
         """Handle balance update from WebSocket."""
         try:
-            # Log balance update
-            logger.info(f"\nBalance Update:")
-            logger.info(f"Asset: {msg['a']}")
-            logger.info(f"Free: {float(msg['f']):.8f}")
-            logger.info(f"Locked: {float(msg['l']):.8f}")
+            # Extract the event data from the message
+            event = msg.get('event', {})
+            
+            # Handle execution report
+            if event.get('e') == 'executionReport':
+                # Update acquisition metrics for filled orders
+                if event['X'] == 'FILLED' and event['S'] == 'BUY':
+                    quantity = float(event['q'])
+                    price = float(event['p'])
+                    cost = quantity * price
+                    
+                    # Update metrics
+                    self.acquired_quantity += quantity
+                    self.total_cost += cost
+                    self.average_price = self.total_cost / self.acquired_quantity if self.acquired_quantity > 0 else 0
+                    
+                    # Log acquisition with color
+                    logger.info(f"\n{Colors.BOLD}{Colors.GREEN}=== Acquisition Update ==={Colors.ENDC}")
+                    logger.info(f"{Colors.GREEN}Filled: {quantity:.8f} BTC @ {price:.2f} USDT{Colors.ENDC}")
+                    logger.info(f"{Colors.GREEN}Total Acquired: {self.acquired_quantity:.8f} / {self.target_quantity:.8f} BTC{Colors.ENDC}")
+                    logger.info(f"{Colors.GREEN}Average Price: {self.average_price:.2f} USDT{Colors.ENDC}")
+                    logger.info(f"{Colors.GREEN}Remaining Cost: {(self.target_quantity - self.acquired_quantity) * self.average_price:.2f} USDT{Colors.ENDC}")
+                    logger.info(f"{Colors.GREEN}========================={Colors.ENDC}")
+                
+                # Log the execution report with strategy color
+                strategy = event.get('c', '').split('_')[0]  # Extract strategy name from client order ID
+                color = STRATEGY_COLORS.get(strategy, Colors.ENDC)
+                logger.info(f"{color}Order Update - {event['S']} {event['q']} @ {event['p']} - Status: {event['X']}{Colors.ENDC}")
+                
+            # Handle balance update
+            elif event.get('e') == 'outboundAccountPosition':
+                # Log each balance update
+                for balance in event.get('B', []):
+                    asset = balance.get('a')
+                    free = float(balance.get('f', 0))
+                    locked = float(balance.get('l', 0))
+                    
+                    if free > 0 or locked > 0:
+                        logger.info(f"{Colors.BLUE}Balance Update - {asset}: Free={free:.8f}, Locked={locked:.8f}{Colors.ENDC}")
             
             # Check if we've reached target
             if self._check_target_reached():
-                logger.info("Target quantity reached! Stopping all strategies...")
+                logger.info(f"{Colors.BOLD}{Colors.GREEN}Target quantity reached! Stopping all strategies...{Colors.ENDC}")
                 self.stop()
                 sys.exit(0)
                 
         except Exception as e:
             logger.error(f"Error handling balance update: {e}")
+            logger.error(f"Message: {msg}")
             
     def start(self) -> None:
         """Start monitoring with WebSocket."""
-        logger.info("Starting trading monitor...")
+        logger.info(f"{Colors.BOLD}Starting trading monitor...{Colors.ENDC}")
         self.running = True
         
         try:
             # Initialize WebSocket manager with API client
-            self.twm = ThreadedWebsocketManager(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET)
+            logger.info(f"{Colors.BOLD}Initializing WebSocket manager...{Colors.ENDC}")
+            
+            # Configure WebSocket manager based on testnet setting
+            if USE_TESTNET:
+                # For testnet, use the testnet configuration
+                self.twm = ThreadedWebsocketManager(
+                    api_key=BINANCE_API_KEY,
+                    api_secret=BINANCE_API_SECRET,
+                    tld='us'  # Use 'us' for testnet
+                )
+            else:
+                # For production, use default settings
+                self.twm = ThreadedWebsocketManager(
+                    api_key=BINANCE_API_KEY,
+                    api_secret=BINANCE_API_SECRET
+                )
+            
+            if not self.twm:
+                raise Exception("Failed to initialize WebSocket manager")
+            
             # start is required to initialise its internal loop
+            logger.info(f"{Colors.BOLD}Starting WebSocket manager...{Colors.ENDC}")
             self.twm.start()
             
             # Start WebSocket streams
+            logger.info(f"{Colors.BOLD}Starting depth socket...{Colors.ENDC}")
             self.conn_key = self.twm.start_depth_socket(
                 symbol=TRADING_PAIR.lower(),
                 callback=self._handle_orderbook_update
             )
+            
+            logger.info(f"{Colors.BOLD}Starting trade socket...{Colors.ENDC}")
             self.twm.start_trade_socket(
                 symbol=TRADING_PAIR.lower(),
                 callback=self._handle_trade_update
@@ -147,17 +226,28 @@ class TradingMonitor:
             
             # Try to start user data stream if API keys are valid
             try:
-                user_stream = self.twm.start_user_socket(
-                    callback=self._handle_balance_update
-                )
-                logger.info("User data stream started successfully")
+                logger.info(f"{Colors.BOLD}Attempting to start user data stream...{Colors.ENDC}")
+                
+                if USE_TESTNET:
+                    # Use ED25519 authentication for testnet
+                    self.user_stream = get_user_data_stream(self._handle_balance_update)
+                    logger.info(f"{Colors.GREEN}User data stream started successfully with ED25519 authentication{Colors.ENDC}")
+                else:
+                    # Use regular authentication for production
+                    self.user_stream = self.twm.start_user_socket(
+                        callback=self._handle_balance_update
+                    )
+                    logger.info(f"{Colors.GREEN}User data stream started successfully{Colors.ENDC}")
+                
             except Exception as e:
-                logger.warning(f"Could not start user data stream: {e}")
-                logger.info("Continuing without user data stream...")
+                logger.error(f"{Colors.RED}Failed to start user data stream: {str(e)}{Colors.ENDC}")
+                logger.error(f"{Colors.RED}This might be due to invalid API keys or insufficient permissions{Colors.ENDC}")
+                logger.info(f"{Colors.YELLOW}Continuing without user data stream...{Colors.ENDC}")
             
             # Start strategies
             for name, strategy in self.strategies.items():
-                logger.info(f"Starting {name} strategy...")
+                color = STRATEGY_COLORS.get(name, Colors.ENDC)
+                logger.info(f"{color}Starting {name} strategy...{Colors.ENDC}")
                 strategy.start()
                 
             # Keep the main thread alive
@@ -165,26 +255,40 @@ class TradingMonitor:
                 time.sleep(1)
                 
         except KeyboardInterrupt:
-            logger.info("Stopping monitor...")
+            logger.info(f"{Colors.YELLOW}Stopping monitor...{Colors.ENDC}")
         except Exception as e:
-            logger.error(f"Error in monitor: {e}")
+            logger.error(f"{Colors.RED}Error in monitor: {str(e)}{Colors.ENDC}")
+            logger.error(f"{Colors.RED}Stack trace:", exc_info=True)
         finally:
             self.stop()
             
     def stop(self) -> None:
         """Stop monitoring and clean up."""
-        logger.info("Stopping monitor...")
+        logger.info(f"{Colors.YELLOW}Stopping monitor...{Colors.ENDC}")
         self.running = False
         
         # Stop strategies
         for name, strategy in self.strategies.items():
-            logger.info(f"Stopping {name} strategy...")
+            color = STRATEGY_COLORS.get(name, Colors.ENDC)
+            logger.info(f"{color}Stopping {name} strategy...{Colors.ENDC}")
             strategy.stop()
             
-        # Stop WebSocket connections
-        if hasattr(self, 'twm'):
-            self.twm.stop()
-            logger.info("WebSocket connections closed")
+        # Stop WebSocket connections if they were initialized
+        if self.twm is not None:
+            try:
+                # Close the user data stream if we have one
+                if self.user_stream:
+                    if USE_TESTNET:
+                        close_user_data_stream(self.user_stream)
+                    else:
+                        self.twm.stop_socket(self.user_stream)
+                
+                self.twm.stop()
+                logger.info(f"{Colors.GREEN}WebSocket connections closed{Colors.ENDC}")
+            except Exception as e:
+                logger.error(f"{Colors.RED}Error stopping WebSocket connections: {e}{Colors.ENDC}")
+        else:
+            logger.info(f"{Colors.YELLOW}No WebSocket connections to close{Colors.ENDC}")
 
 def main():
     """Main entry point."""
@@ -201,7 +305,7 @@ def main():
         monitor.start()
         
     except Exception as e:
-        logger.error(f"Error in main: {e}")
+        logger.error(f"{Colors.RED}Error in main: {e}{Colors.ENDC}")
         raise
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import logging
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any, List, Union
 import time
 
 # Configure logging
@@ -19,9 +19,10 @@ class BinanceAPI:
         Args:
             api_key: Binance API key
             api_secret: Binance API secret
-            use_testnet: Whether to use testnet (default: False for production)
+            use_testnet: Whether to use testnet (default: False)
         """
         self.client = Client(api_key, api_secret, testnet=use_testnet)
+        logger.info(f"Initialized Binance API client (testnet: {use_testnet})")
         self._validate_connection()
         
     def _validate_connection(self) -> None:
@@ -155,7 +156,7 @@ class BinanceAPI:
             logger.error(f"Error getting status for order {order_id} on {pair}: {e}")
             raise
 
-    def get_account_balance(self, asset: str) -> float:
+    def get_account_balance(self, asset: str) -> Union[Dict, float]:
         """
         Get the balance of a specific asset.
         
@@ -169,13 +170,13 @@ class BinanceAPI:
             account = self.client.get_account()
             for balance in account['balances']:
                 if balance['asset'] == asset:
-                    return float(balance['free'])
+                    return balance
             return 0.0
         except BinanceAPIException as e:
             logger.error(f"Error getting balance for {asset}: {e}")
-            raise
+            return 0.0
 
-    def get_orderbook(self, pair: str, limit: int = 100) -> Dict[str, Any]:
+    def get_orderbook(self, pair: str, limit: int = 100) -> Dict:
         """
         Get the orderbook for a trading pair.
         
@@ -190,7 +191,7 @@ class BinanceAPI:
             return self.client.get_order_book(symbol=pair, limit=limit)
         except BinanceAPIException as e:
             logger.error(f"Error getting orderbook for {pair}: {e}")
-            raise
+            return {'bids': [], 'asks': []}
 
     def get_exchange_info(self) -> Dict:
         """
@@ -205,3 +206,42 @@ class BinanceAPI:
         except Exception as e:
             logger.error(f"Error getting exchange info: {e}")
             raise
+
+    def get_recent_trades(self, symbol: str, limit: int = 100) -> List[Dict]:
+        """Get recent trades for a symbol."""
+        try:
+            return self.client.get_recent_trades(symbol=symbol, limit=limit)
+        except BinanceAPIException as e:
+            logger.error(f"Error getting recent trades: {e}")
+            return []
+
+    def place_order(self, symbol: str, side: str, order_type: str, 
+                   quantity: float, price: Optional[float] = None,
+                   time_in_force: str = 'GTC') -> Dict:
+        """Place an order."""
+        try:
+            params = {
+                'symbol': symbol,
+                'side': side,
+                'type': order_type,
+                'quantity': quantity,
+                'timeInForce': time_in_force
+            }
+            
+            if price and order_type == 'LIMIT':
+                params['price'] = price
+                
+            return self.client.create_order(**params)
+        except BinanceAPIException as e:
+            logger.error(f"Error placing order: {e}")
+            return {}
+
+    def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
+        """Get open orders."""
+        try:
+            if symbol:
+                return self.client.get_open_orders(symbol=symbol)
+            return self.client.get_open_orders()
+        except BinanceAPIException as e:
+            logger.error(f"Error getting open orders: {e}")
+            return []

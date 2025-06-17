@@ -1,9 +1,9 @@
 import logging
 import time
 import random
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 from utils.binance_api import BinanceAPI
-from config import TRADING_PAIR, BIG_FISH
+from config import TRADING_PAIR, BIG_FISH, MAX_PRICE
 from .base_strategy import BaseStrategy
 
 logger = logging.getLogger(__name__)
@@ -22,124 +22,71 @@ class BigFishStrategy(BaseStrategy):
         jitter = self.config['jitter']
         return base_time + random.uniform(-jitter, jitter)
         
-    def _calculate_weighted_price(self, orders: List[Tuple[float, float]]) -> float:
+    def _should_place_order(self, ask_price: float, ask_quantity: float) -> bool:
         """
-        Calculate weighted average price from a list of orders.
+        Check if we should place an order based on price and quantity.
         """
-        total_quantity = sum(qty for _, qty in orders)
-        if total_quantity == 0:
-            return 0
+        # Check if price is within our limit
+        if ask_price > MAX_PRICE:
+            return False
             
-        weighted_sum = sum(price * qty for price, qty in orders)
-        return weighted_sum / total_quantity
+        # Check if quantity is above our minimum
+        if ask_quantity < self.config['min_ask_quantity']:
+            return False
+            
+        return True
         
-    def _find_big_fish(self) -> Optional[Tuple[float, float, List[Tuple[float, float]]]]:
+    def _calculate_order_quantity(self, ask_quantity: float) -> float:
         """
-        Find a big fish in the orderbook.
-        Returns tuple of (price, quantity, orders) if found, None otherwise.
+        Calculate the order quantity based on the ask quantity.
+        """
+        # Calculate quantity based on multiplier
+        quantity = ask_quantity * self.config['order_multiplier']
+        
+        # Cap at maximum order quantity
+        if self.config['max_order_quantity'] is not None:
+            quantity = min(quantity, self.config['max_order_quantity'])
+            
+        return quantity
+        
+    def _place_taker_order(self) -> None:
+        """
+        Place a taker order.
         """
         try:
-            # Get orderbook
-            orderbook = self.api.get_orderbook(TRADING_PAIR, limit=self.config['max_orders_to_analyze'])
-            
-            # Look through asks for a big fish
-            for price, quantity in orderbook['asks']:
-                price = float(price)
-                quantity = float(quantity)
-                
-                # Check if this individual order is a big fish
-                if quantity >= self.config['min_volume']:
-                    # Calculate weighted average price for all orders up to and including this one
-                    orders = []
-                    total_quantity = 0
-                    
-                    for ask_price, ask_qty in orderbook['asks']:
-                        ask_price = float(ask_price)
-                        ask_qty = float(ask_qty)
-                        
-                        orders.append((ask_price, ask_qty))
-                        total_quantity += ask_qty
-                        
-                        # Stop when we reach our big fish
-                        if ask_price == price:
-                            break
-                    
-                    # Check if weighted average price is acceptable
-                    avg_price = self._calculate_weighted_price(orders)
-                    if self.config['max_price'] is None or avg_price <= self.config['max_price']:
-                        return price, total_quantity, orders
-                    
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error finding big fish: {e}")
-            return None
-            
-    def _place_big_fish_order(self) -> None:
-        """
-        Place an order to take a big fish.
-        """
-        try:
-            # Find a big fish
-            result = self._find_big_fish()
-            if result is None:
+            # Get current best ask
+            orderbook = self.api.get_orderbook(TRADING_PAIR, limit=1)
+            if not orderbook['asks']:
                 return
                 
-            price, total_quantity, orders = result
+            ask_price = float(orderbook['asks'][0][0])
+            ask_quantity = float(orderbook['asks'][0][1])
+            
+            # Check if we should place an order
+            if not self._should_place_order(ask_price, ask_quantity):
+                return
+                
+            # Calculate order quantity
+            order_qty = self._calculate_order_quantity(ask_quantity)
             
             # Round price and quantity
-            rounded_price = self.round_price(price)
-            rounded_quantity = self.round_quantity(total_quantity)
+            rounded_price = self.round_price(ask_price)
+            rounded_qty = self.round_quantity(order_qty)
             
-            # Log orderbook state before taking the order
-            logger.info("\n=== Before Taking Big Fish Order ===")
-            orderbook = self.api.get_orderbook(TRADING_PAIR, limit=self.config['max_orders_to_analyze'])
-            
-            logger.info("Top Bids:")
-            for bid_price, bid_qty in orderbook['bids'][:5]:
-                logger.info(f"  Price: {float(bid_price):.2f}, Quantity: {float(bid_qty):.4f}")
-                
-            logger.info("\nTop Asks (up to big fish):")
-            for ask_price, ask_qty in orderbook['asks'][:len(orders)]:
-                logger.info(f"  Price: {float(ask_price):.2f}, Quantity: {float(ask_qty):.4f}")
-            
-            # Place limit order with rounded values
+            # Place limit order
             order = self.api.place_limit_order(
                 pair=TRADING_PAIR,
                 price=rounded_price,
-                quantity=rounded_quantity,
+                quantity=rounded_qty,
                 side='BUY',
-                post_only=False  # We want to take liquidity
+                post_only=False  # We want to be a taker
             )
             
-            # Wait a moment for the order to be processed
-            time.sleep(1)
-            
-            # Log orderbook state after taking the order
-            logger.info("\n=== After Taking Big Fish Order ===")
-            orderbook = self.api.get_orderbook(TRADING_PAIR, limit=self.config['max_orders_to_analyze'])
-            
-            logger.info("Top Bids:")
-            for bid_price, bid_qty in orderbook['bids'][:5]:
-                logger.info(f"  Price: {float(bid_price):.2f}, Quantity: {float(bid_qty):.4f}")
-                
-            logger.info("\nTop Asks:")
-            for ask_price, ask_qty in orderbook['asks'][:5]:
-                logger.info(f"  Price: {float(ask_price):.2f}, Quantity: {float(ask_qty):.4f}")
-            
-            logger.info(f"\nOrder Details:")
-            logger.info(f"  Original Price: {price:.2f}")
-            logger.info(f"  Rounded Price: {rounded_price:.2f}")
-            logger.info(f"  Original Quantity: {total_quantity:.4f}")
-            logger.info(f"  Rounded Quantity: {rounded_quantity:.4f}")
-            logger.info(f"  Orders Taken: {len(orders)}")
-            logger.info(f"  Average Price: {self._calculate_weighted_price(orders):.2f}")
-            logger.info("===============================\n")
-            
+            logger.info(f"Placed taker order at {rounded_price} for {rounded_qty} {TRADING_PAIR}")
             self.last_order_time = time.time()
             
         except Exception as e:
-            logger.error(f"Error placing big fish order: {e}")
+            logger.error(f"Error placing taker order: {e}")
             
     def start(self) -> None:
         """
@@ -156,7 +103,7 @@ class BigFishStrategy(BaseStrategy):
                     continue
                     
                 # Try to place an order
-                self._place_big_fish_order()
+                self._place_taker_order()
                 
                 # Sleep to avoid hitting rate limits
                 time.sleep(1)

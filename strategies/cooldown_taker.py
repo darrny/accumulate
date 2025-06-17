@@ -3,7 +3,7 @@ import time
 import random
 from typing import Optional, Tuple
 from utils.binance_api import BinanceAPI
-from config import TRADING_PAIR, COOLDOWN_TAKER
+from config import TRADING_PAIR, COOLDOWN_TAKER, MAX_PRICE
 from .base_strategy import BaseStrategy
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ class CooldownTakerStrategy(BaseStrategy):
         """
         Get cooldown time with jitter.
         """
-        base_time = self.config['cooldown_time']
+        base_time = self.config['min_cooldown']
         jitter = self.config['jitter']
         return base_time + random.uniform(-jitter, jitter)
         
@@ -27,11 +27,11 @@ class CooldownTakerStrategy(BaseStrategy):
         Check if we should place an order based on price and quantity.
         """
         # Check if price is within our limit
-        if self.config['max_price'] is not None and ask_price > self.config['max_price']:
+        if ask_price > MAX_PRICE:
             return False
             
-        # Check if quantity is below our maximum
-        if ask_quantity > self.config['max_ask_quantity']:
+        # Check if quantity is below our minimum taker quantity
+        if ask_quantity < self.config['min_taker_quantity']:
             return False
             
         return True

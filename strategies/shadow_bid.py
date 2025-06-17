@@ -3,7 +3,7 @@ import time
 import random
 from typing import Optional, Tuple
 from utils.binance_api import BinanceAPI
-from config import TRADING_PAIR, SHADOW_BID
+from config import TRADING_PAIR, SHADOW_BID, MAX_PRICE
 from .base_strategy import BaseStrategy
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,10 @@ class ShadowBidStrategy(BaseStrategy):
             # Calculate shadow price
             shadow_price = best_bid_price * (1 - self.config['price_multiplier'])
             
+            # Check if price is within our limit
+            if shadow_price > MAX_PRICE:
+                return
+                
             # Calculate order quantity
             order_qty = best_bid_qty * self.config['quantity_multiplier']
             

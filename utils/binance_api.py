@@ -249,3 +249,16 @@ class BinanceAPI:
         except BinanceAPIException as e:
             logger.error(f"Error getting open orders: {e}")
             return []
+
+    def get_account(self) -> Dict:
+        """
+        Get account information including balances.
+        
+        Returns:
+            Dict containing account information
+        """
+        try:
+            return self.client.get_account()
+        except BinanceAPIException as e:
+            logger.error(f"Error getting account info: {e}")
+            raise

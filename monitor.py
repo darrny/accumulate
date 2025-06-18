@@ -13,7 +13,7 @@ from binance import AsyncClient, BinanceSocketManager
 from utils.binance_api import BinanceAPI
 from utils.ed25519_auth import get_user_data_stream, close_user_data_stream
 from utils.colors import Colors, STRATEGY_COLORS
-from config import TRADING_PAIR, SHADOW_BID, COOLDOWN_TAKER, BIG_FISH, TARGET_QUANTITY, BINANCE_API_KEY, BINANCE_API_SECRET, USE_TESTNET
+from config import TRADING_PAIR, SHADOW_BID, COOLDOWN_TAKER, BIG_FISH, TARGET_QUANTITY, BINANCE_API_KEY, BINANCE_API_SECRET, USE_TESTNET, BASE, QUOTE
 from strategies.shadow_bid import ShadowBidStrategy
 from strategies.cooldown_taker import CooldownTakerStrategy
 from strategies.big_fish import BigFishStrategy
@@ -53,10 +53,23 @@ class TradingMonitor:
         self.last_config_check = 0
         self.config_check_interval = 10  # Check config every 10 seconds
         
+        # Initialize base and quote assets
+        self.base = BASE
+        self.quote = QUOTE
+        
+        # Initialize positions dictionary
+        self.positions = {}
+        
         # Track weighted average price
         self.total_cost = 0.0
         self.filled_quantity = 0.0  # Track quantity from filled orders
         self.weighted_avg_price = 0.0
+        
+        # Initialize session-specific statistics
+        self._session_start_quantity = None  # Track quantity at session start
+        self._session_acquired_quantity = 0  # Track quantity acquired in this session
+        self._session_total_cost = 0  # Track total cost in this session
+        self._session_average_price = 0  # Track average price in this session
         
         # Initialize strategies based on initial config
         self._update_strategies()
@@ -173,26 +186,32 @@ class TradingMonitor:
                 logger.info(f"  {price:.2f} USDT - {qty:.8f} BTC")
             logger.info(f"{Colors.BOLD}============================={Colors.ENDC}")
             
-    def _handle_trade_update(self, msg: Dict) -> None:
-        """Handle trade update from WebSocket."""
+    def _handle_trade_update(self, trade):
+        """Handle trade updates from WebSocket"""
         try:
-            # Update last trade
-            self.last_trade = {
-                'price': float(msg['p']),
-                'quantity': float(msg['q']),
-                'time': msg['T'],
-                'is_buyer_maker': msg['m']
-            }
+            # Update session stats
+            is_buyer = trade.get('isBuyer', trade.get('m', False))  # Handle both WebSocket and REST formats
+            if is_buyer:  # We bought
+                quantity = float(trade.get('qty', trade.get('q', 0)))
+                price = float(trade.get('price', trade.get('p', 0)))
+                self._update_session_stats(quantity, price)
+                self._log_progress()
+
+            # Update orders list
+            self._update_orders()
+            
+            # Update positions
+            self._update_positions()
             
             # Check if we've reached target
             if self._check_target_reached():
                 logger.info(f"{Colors.BOLD}{Colors.GREEN}Target quantity reached! Stopping all strategies...{Colors.ENDC}")
                 self.stop()
                 sys.exit(0)
-                
+            
         except Exception as e:
             logger.error(f"Error handling trade update: {e}")
-            
+
     def _handle_balance_update(self, msg: Dict) -> None:
         """Handle balance update from WebSocket."""
         try:
@@ -237,12 +256,6 @@ class TradingMonitor:
                     if free > 0 or locked > 0:
                         logger.info(f"{Colors.BLUE}Balance Update - {asset}: Free={free:.8f}, Locked={locked:.8f}{Colors.ENDC}")
             
-            # Check if we've reached target
-            if self._check_target_reached():
-                logger.info(f"{Colors.BOLD}{Colors.GREEN}Target quantity reached! Stopping all strategies...{Colors.ENDC}")
-                self.stop()
-                sys.exit(0)
-                
         except Exception as e:
             logger.error(f"{Colors.RED}Error handling balance update: {e}{Colors.ENDC}")
             
@@ -391,6 +404,67 @@ class TradingMonitor:
                 logger.error(f"{Colors.RED}Error stopping WebSocket connections: {e}{Colors.ENDC}")
         else:
             logger.info(f"{Colors.YELLOW}No WebSocket connections to close{Colors.ENDC}")
+
+    def _update_session_stats(self, quantity, price):
+        """Update session-specific statistics"""
+        self._session_acquired_quantity += quantity
+        cost = quantity * price
+        self._session_total_cost += cost
+        if self._session_acquired_quantity > 0:
+            self._session_average_price = self._session_total_cost / self._session_acquired_quantity
+
+    def _log_progress(self):
+        """Log current accumulation progress"""
+        if self._session_start_quantity is None:
+            # Get initial quantity if not set
+            try:
+                account = self.api.get_account()
+                for balance in account['balances']:
+                    if balance['asset'] == self.base:  # Use self.base instead of TRADING_PAIR.replace
+                        self._session_start_quantity = float(balance['free'])
+                        break
+            except Exception as e:
+                logger.error(f"Error getting initial quantity: {e}")
+                return
+
+        total_quantity = self._session_start_quantity + self._session_acquired_quantity
+        remaining = self.target_quantity - total_quantity  # Use total_quantity instead of session_acquired
+        remaining_cost = remaining * self._session_average_price if self._session_average_price > 0 else 0
+
+        logger.info(f"Progress: {total_quantity:.8f} / {self.target_quantity:.8f} {self.base} "
+                   f"(Session: +{self._session_acquired_quantity:.8f} {self.base})")
+        logger.info(f"Average Entry: {self._session_average_price:.2f} {self.quote} "
+                   f"(Remaining Cost: {remaining_cost:.2f} {self.quote})")
+
+    def _update_orders(self):
+        """Update current orders"""
+        try:
+            self.orders = self.api.get_open_orders(TRADING_PAIR)
+        except Exception as e:
+            logger.error(f"Error updating orders: {e}")
+
+    def _update_positions(self):
+        """Update current positions"""
+        try:
+            account = self.api.client.get_account()
+            for balance in account['balances']:
+                if balance['asset'] in [self.base, self.quote]:
+                    self.positions[balance['asset']] = {
+                        'free': float(balance['free']),
+                        'locked': float(balance['locked'])
+                    }
+        except Exception as e:
+            logger.error(f"Error updating positions: {e}")
+
+    def get_remaining_quantity(self) -> float:
+        """Get remaining quantity to acquire."""
+        try:
+            current_quantity = float(self.api.get_account_balance(self.base).get('free', 0))
+            remaining = self.target_quantity - current_quantity
+            return max(0, remaining)
+        except Exception as e:
+            logger.error(f"Error getting remaining quantity: {e}")
+            return 0
 
 def main():
     """Main entry point."""

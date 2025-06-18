@@ -10,8 +10,8 @@ from .base_strategy import BaseStrategy
 logger = logging.getLogger(__name__)
 
 class ShadowBidStrategy(BaseStrategy):
-    def __init__(self, api: BinanceAPI):
-        super().__init__(api)
+    def __init__(self, api: BinanceAPI, monitor=None):
+        super().__init__(api, monitor)
         self.config = SHADOW_BID
         self.last_order_time = 0
         self.current_order_id = None

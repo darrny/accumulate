@@ -10,8 +10,8 @@ from .base_strategy import BaseStrategy
 logger = logging.getLogger(__name__)
 
 class CooldownTakerStrategy(BaseStrategy):
-    def __init__(self, api: BinanceAPI):
-        super().__init__(api)
+    def __init__(self, api: BinanceAPI, monitor=None):
+        super().__init__(api, monitor)
         self.config = COOLDOWN_TAKER
         self.last_order_time = 0
         

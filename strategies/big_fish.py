@@ -56,28 +56,70 @@ class BigFishStrategy(BaseStrategy):
         return True
         
     def _calculate_order_quantity(self, orderbook: Dict) -> float:
-        """Calculate the quantity for our taker order."""
+        """Calculate the quantity for our big fish order."""
         try:
-            # Get the best ask
-            best_ask = float(orderbook['asks'][0][0]) if orderbook['asks'] else 0
-            best_ask_qty = float(orderbook['asks'][0][1]) if orderbook['asks'] else 0
-            
-            # Calculate percentage-based quantity
+            # Get remaining quantity to acquire
             remaining = self.get_remaining_quantity()
-            percentage_quantity = remaining * self.config['order_size_percentage']
+            if remaining <= 0:
+                return 0.0
+
+            # Look through asks to find a big fish
+            total_quantity = 0
+            weighted_price = 0
+            min_volume = self.target_quantity * self.config['min_volume_percentage']
             
-            # Use the smaller of the two quantities
-            quantity = min(best_ask_qty, percentage_quantity)
+            for price, quantity in orderbook['asks']:
+                price = float(price)
+                quantity = float(quantity)
+                
+                # Add this order to our running totals
+                total_quantity += quantity
+                weighted_price = ((weighted_price * (total_quantity - quantity)) + (price * quantity)) / total_quantity
+                
+                # Check if we found a big fish
+                if quantity >= min_volume and weighted_price <= MAX_PRICE:
+                    # Found a big fish! Take all orders up to and including this one
+                    return min(remaining, total_quantity)
+                
+                # Stop if we've looked at enough orders
+                if len(orderbook['asks']) > self.config['max_orders_to_analyze']:
+                    break
             
-            # Apply maximum order size limit
-            max_order_size = self.config.get('max_order_size', float('inf'))
-            quantity = min(quantity, max_order_size)
-            
-            # Round to appropriate decimal places
-            return self.round_quantity(quantity)
+            return 0.0  # No big fish found
             
         except Exception as e:
             logger.error(f"{Colors.RED}Error calculating order quantity: {str(e)}{Colors.ENDC}")
+            return 0.0
+
+    def _calculate_order_price(self, orderbook: Dict) -> float:
+        """Calculate the price for our big fish order."""
+        try:
+            # Look through asks to find a big fish
+            total_quantity = 0
+            weighted_price = 0
+            min_volume = self.target_quantity * self.config['min_volume_percentage']
+            
+            for price, quantity in orderbook['asks']:
+                price = float(price)
+                quantity = float(quantity)
+                
+                # Add this order to our running totals
+                total_quantity += quantity
+                weighted_price = ((weighted_price * (total_quantity - quantity)) + (price * quantity)) / total_quantity
+                
+                # Check if we found a big fish
+                if quantity >= min_volume and weighted_price <= MAX_PRICE:
+                    # Found a big fish! Use this order's price
+                    return price
+                
+                # Stop if we've looked at enough orders
+                if len(orderbook['asks']) > self.config['max_orders_to_analyze']:
+                    break
+            
+            return 0.0  # No big fish found
+            
+        except Exception as e:
+            logger.error(f"{Colors.RED}Error calculating order price: {str(e)}{Colors.ENDC}")
             return 0.0
         
     def _place_taker_order(self) -> None:
@@ -101,9 +143,15 @@ class BigFishStrategy(BaseStrategy):
             if quantity <= 0:
                 return
                 
-            # Place market order
-            order = self.api.place_market_order(
+            # Calculate order price (use the price of the big ask)
+            price = self._calculate_order_price(orderbook)
+            if price <= 0:
+                return
+                
+            # Place limit order
+            order = self.api.place_limit_order(
                 pair=TRADING_PAIR,
+                price=price,
                 quantity=quantity,
                 side='BUY'
             )
@@ -112,9 +160,12 @@ class BigFishStrategy(BaseStrategy):
             if self.monitor is None:
                 self.update_acquired_quantity(quantity)
             
-            logger.info(f"{Colors.PINK}Placed taker order for {quantity} {BASE} at market price{Colors.ENDC}")
+            logger.info(f"{Colors.PINK}Placed limit order for {quantity} {BASE} at {price} {QUOTE}{Colors.ENDC}")
             
             self.last_order_time = time.time()
+            
+            # Update progress
+            self._update_progress()
             
         except Exception as e:
             logger.error(f"{Colors.RED}Error placing taker order: {str(e)}{Colors.ENDC}")

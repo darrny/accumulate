@@ -38,20 +38,14 @@ class CooldownTakerStrategy(BaseStrategy):
     def _calculate_order_quantity(self, orderbook: Dict) -> float:
         """Calculate the quantity for our taker order."""
         try:
-            # Get the best ask
-            best_ask = float(orderbook['asks'][0][0]) if orderbook['asks'] else 0
-            best_ask_qty = float(orderbook['asks'][0][1]) if orderbook['asks'] else 0
+            # Calculate quantity based on target amount
+            target_based_quantity = self.target_quantity * self.config['order_size_percentage']
             
-            # Calculate percentage-based quantity
+            # Get remaining quantity to acquire
             remaining = self.get_remaining_quantity()
-            percentage_quantity = remaining * self.config['order_size_percentage']
             
-            # Use the smaller of the two quantities
-            quantity = min(best_ask_qty, percentage_quantity)
-            
-            # Apply maximum order size limit
-            max_order_size = self.config.get('max_order_size', float('inf'))
-            quantity = min(quantity, max_order_size)
+            # Use the smaller of target-based quantity and remaining quantity
+            quantity = min(target_based_quantity, remaining)
             
             # Round to appropriate decimal places
             return self.round_quantity(quantity)
@@ -115,6 +109,9 @@ class CooldownTakerStrategy(BaseStrategy):
             logger.info(f"{Colors.PINK}Placed taker order for {quantity} {BASE} at market price{Colors.ENDC}")
             
             self.last_order_time = time.time()
+            
+            # Update progress
+            self._update_progress()
             
         except Exception as e:
             logger.error(f"{Colors.RED}Error placing taker order: {str(e)}{Colors.ENDC}")

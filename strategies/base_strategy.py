@@ -12,8 +12,11 @@ class BaseStrategy(ABC):
         self.api = api
         self.monitor = monitor
         self.running = False
-        self.last_order_time = 0
+        self.thread = None
+        self.target_quantity = TARGET_QUANTITY  # Add target quantity from config
         self._trading_pair_info = None
+        self._load_trading_pair_info()
+        self.last_order_time = 0
         self._quantity_precision = None
         self._price_precision = None
         self._min_qty = None
@@ -23,6 +26,38 @@ class BaseStrategy(ABC):
         self._max_price = None
         self._tick_size = None
         self._acquired_quantity = 0.0  # Track acquired quantity for standalone mode
+        
+    def _load_trading_pair_info(self):
+        """Load trading pair information from exchange."""
+        try:
+            # Get exchange info
+            exchange_info = self.api.client.get_exchange_info()
+            
+            # Find our trading pair
+            for symbol in exchange_info['symbols']:
+                if symbol['symbol'] == TRADING_PAIR:
+                    self._trading_pair_info = symbol
+                    
+                    # Log the trading pair info
+                    logger.info(f"Trading pair info loaded for {TRADING_PAIR}:")
+                    
+                    # Log base asset info
+                    base_asset = symbol['baseAsset']
+                    base_info = next((f for f in symbol['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+                    if base_info:
+                        logger.info(f"  {base_asset} - Min: {base_info['minQty']}, Max: {base_info['maxQty']}, "
+                                  f"Step: {base_info['stepSize']}, Precision: {len(base_info['stepSize'].split('.')[-1].rstrip('0'))}")
+                    
+                    # Log quote asset info
+                    quote_asset = symbol['quoteAsset']
+                    price_info = next((f for f in symbol['filters'] if f['filterType'] == 'PRICE_FILTER'), None)
+                    if price_info:
+                        logger.info(f"  {quote_asset} - Min: {price_info['minPrice']}, Max: {price_info['maxPrice']}, "
+                                  f"Tick: {price_info['tickSize']}, Precision: {len(price_info['tickSize'].split('.')[-1].rstrip('0'))}")
+                    break
+                    
+        except Exception as e:
+            logger.error(f"Error loading trading pair info: {e}")
         
     def _get_trading_pair_info(self) -> Optional[Dict]:
         """Get and cache trading pair information."""
@@ -84,6 +119,14 @@ class BaseStrategy(ABC):
     def update_acquired_quantity(self, quantity: float) -> None:
         """Update the acquired quantity (for standalone mode)."""
         self._acquired_quantity += quantity
+        
+    def _update_progress(self) -> None:
+        """Update progress via REST API."""
+        try:
+            if self.monitor is not None:
+                self.monitor._log_progress()
+        except Exception as e:
+            logger.error(f"{Colors.RED}Error updating progress: {e}{Colors.ENDC}")
         
     @abstractmethod
     def start(self) -> None:

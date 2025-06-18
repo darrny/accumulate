@@ -39,30 +39,14 @@ class ShadowBidStrategy(BaseStrategy):
     def _calculate_order_quantity(self, orderbook: Dict) -> float:
         """Calculate the quantity for our shadow bid order."""
         try:
-            # Get the best bid and ask
-            best_bid = float(orderbook['bids'][0][0]) if orderbook['bids'] else 0
-            best_bid_qty = float(orderbook['bids'][0][1]) if orderbook['bids'] else 0
-            best_ask = float(orderbook['asks'][0][0]) if orderbook['asks'] else 0
-            best_ask_qty = float(orderbook['asks'][0][1]) if orderbook['asks'] else 0
+            # Calculate quantity based on target amount
+            target_based_quantity = self.target_quantity * self.config['order_size_percentage']
             
-            # Calculate our order quantity based on the best bid quantity
-            quantity = best_bid_qty * self.config['quantity_multiplier']
-            
-            # Also consider the ask side if enabled
-            if self.config['min_ask_quantity'] > 0 and best_ask_qty >= self.config['min_ask_quantity']:
-                ask_based_quantity = best_ask_qty * self.config['order_multiplier']
-                quantity = max(quantity, ask_based_quantity)
-            
-            # Calculate percentage-based quantity
+            # Get remaining quantity to acquire
             remaining = self.get_remaining_quantity()
-            percentage_quantity = remaining * self.config['order_size_percentage']
             
-            # Use the smaller of the two quantities
-            quantity = min(quantity, percentage_quantity)
-            
-            # Apply maximum order size limit
-            max_order_size = self.config.get('max_order_size', float('inf'))
-            quantity = min(quantity, max_order_size)
+            # Use the smaller of target-based quantity and remaining quantity
+            quantity = min(target_based_quantity, remaining)
             
             # Round to appropriate decimal places
             return self.round_quantity(quantity)
@@ -119,6 +103,9 @@ class ShadowBidStrategy(BaseStrategy):
             
             logger.info(f"{Colors.CYAN}Placed shadow order at {price} {QUOTE} for {quantity} {BASE}{Colors.ENDC}")
             self.last_order_time = time.time()
+            
+            # Update progress
+            self._update_progress()
             
         except Exception as e:
             logger.error(f"{Colors.RED}Error placing shadow order: {e}{Colors.ENDC}")

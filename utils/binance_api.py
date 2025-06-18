@@ -262,3 +262,42 @@ class BinanceAPI:
         except BinanceAPIException as e:
             logger.error(f"Error getting account info: {e}")
             raise
+
+    def get_listen_key(self) -> str:
+        """
+        Get a listen key for user data stream.
+        
+        Returns:
+            Listen key string
+        """
+        try:
+            return self.client.stream_get_listen_key()
+        except BinanceAPIException as e:
+            logger.error(f"Error getting listen key: {e}")
+            raise
+
+    def keep_listen_key_alive(self, listen_key: str) -> None:
+        """
+        Keep a listen key alive.
+        
+        Args:
+            listen_key: The listen key to keep alive
+        """
+        try:
+            self.client.stream_keepalive(listen_key)
+        except BinanceAPIException as e:
+            logger.error(f"Error keeping listen key alive: {e}")
+            raise
+
+    def close_listen_key(self, listen_key: str) -> None:
+        """
+        Close a listen key.
+        
+        Args:
+            listen_key: The listen key to close
+        """
+        try:
+            self.client.stream_close_listen_key(listen_key)
+        except BinanceAPIException as e:
+            logger.error(f"Error closing listen key: {e}")
+            raise

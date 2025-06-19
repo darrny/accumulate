@@ -19,6 +19,7 @@ from strategies.big_fish import BigFishStrategy
 from datetime import datetime
 import traceback
 import signal
+import importlib
 
 # Configure logging
 logging.basicConfig(
@@ -114,34 +115,56 @@ class TradingMonitor:
                 callback=self._handle_user_update
             )
             logger.info("User data stream started successfully")
-            
-            # Initialize strategies after WebSocket is ready
-            logger.info("Initializing shadow_bid strategy...")
-            self.strategies['shadow_bid'] = ShadowBidStrategy(self.api, self)
-            
-            logger.info("Initializing cooldown_taker strategy...")
-            self.strategies['cooldown_taker'] = CooldownTakerStrategy(self.api, self)
-            
-            logger.info("Initializing big_fish strategy...")
-            self.strategies['big_fish'] = BigFishStrategy(self.api, self)
-            
-            # Start strategy threads with 4-second intervals
-            strategy_names = list(self.strategies.keys())
-            for i, name in enumerate(strategy_names):
+
+            # --- Load strategy config before initializing strategies ---
+            strategy_config = None
+            try:
+                spec = importlib.util.spec_from_file_location("config_strategies", "config_strategies.py")
+                if spec is not None and spec.loader is not None:
+                    strategy_config = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(strategy_config)
+            except Exception as e:
+                logger.error(f"{Colors.RED}Error loading config_strategies.py: {e}{Colors.ENDC}")
+                strategy_config = None
+
+            # Only initialize strategies that are enabled in config
+            strategies_to_init = []
+            if strategy_config is not None:
+                if getattr(strategy_config, 'SHADOW_BID', False):
+                    strategies_to_init.append(('shadow_bid', ShadowBidStrategy))
+                if getattr(strategy_config, 'COOLDOWN_TAKER', False):
+                    strategies_to_init.append(('cooldown_taker', CooldownTakerStrategy))
+                if getattr(strategy_config, 'BIG_FISH', False):
+                    strategies_to_init.append(('big_fish', BigFishStrategy))
+            else:
+                # If config can't be loaded, default to all enabled (fail-safe)
+                strategies_to_init = [
+                    ('shadow_bid', ShadowBidStrategy),
+                    ('cooldown_taker', CooldownTakerStrategy),
+                    ('big_fish', BigFishStrategy)
+                ]
+
+            # Initialize and start enabled strategies with 4-second intervals
+            for i, (name, cls) in enumerate(strategies_to_init):
+                logger.info(f"Initializing {name} strategy...")
+                self.strategies[name] = cls(self.api, self)
                 logger.info(f"Starting {name} strategy thread...")
                 thread = threading.Thread(target=self.strategies[name].start)
                 thread.daemon = True
                 thread.start()
                 self.strategy_threads[name] = thread
                 logger.info(f"{name} strategy thread started successfully")
-                
-                # Wait 4 seconds before starting the next strategy (except for the last one)
-                if i < len(strategy_names) - 1:
+                if i < len(strategies_to_init) - 1:
                     logger.info(f"Waiting 4 seconds before starting next strategy...")
                     time.sleep(4)
-            
+
             # Set running flag
             self.running = True
+            
+            # Start strategy config watcher thread
+            watcher_thread = threading.Thread(target=self._strategy_config_watcher)
+            watcher_thread.daemon = True
+            watcher_thread.start()
             
             # Keep main thread alive and check for target reached
             while self.running:
@@ -518,21 +541,18 @@ class TradingMonitor:
                 total_cost = 0.0
                 avg_price = 0.0
                 
-            log_message = (
-                f"\n{Colors.BOLD_WHITE}=== Current Status ==={Colors.ENDC}\n"
-                f"{Colors.BOLD_MAGENTA}Session Start Balance: {self._session_start_quantity:.8f} {BASE}{Colors.ENDC}\n"
-                f"{Colors.BOLD_MAGENTA}Current Balance: {current_quantity:.8f} {BASE}{Colors.ENDC}\n"
-                f"{Colors.BOLD_GREEN}Session Acquired: {session_acquired:.8f} {BASE}{Colors.ENDC}\n"
-                f"{Colors.BOLD_MAGENTA}Locked in Orders: {locked_quantity:.8f} {BASE}{Colors.ENDC}\n"
-                f"{Colors.BOLD_MAGENTA}Total (Balance + Locked): {total_quantity:.8f} {BASE}{Colors.ENDC}\n"
-                f"{Colors.BOLD_YELLOW}Target: {TARGET_QUANTITY:.8f} {BASE}{Colors.ENDC}\n"
-                f"{Colors.BOLD_YELLOW}Remaining: {remaining:.8f} {BASE}{Colors.ENDC}\n"
-                f"{Colors.BOLD_GREEN}Session Average Entry: {avg_price:.8f} {QUOTE}{Colors.ENDC}\n"
-                f"{Colors.BOLD_MAGENTA}Session Total Cost: {total_cost:.8f} {QUOTE}{Colors.ENDC}\n"
-                f"{Colors.BOLD_MAGENTA}Session Trades Count: {len(self._session_trades)}{Colors.ENDC}"
-            )
-
-            logger.info(log_message)
+            # Log progress
+            logger.info(f"{Colors.BOLD_WHITE}=== Current Status ==={Colors.ENDC}")
+            logger.info(f"{Colors.BOLD_MAGENTA}Session Start Balance: {self._session_start_quantity:.8f} {BASE}{Colors.ENDC}")
+            logger.info(f"{Colors.BOLD_MAGENTA}Current Balance: {current_quantity:.8f} {BASE}{Colors.ENDC}")
+            logger.info(f"{Colors.BOLD_GREEN}Session Acquired: {session_acquired:.8f} {BASE}{Colors.ENDC}")
+            logger.info(f"{Colors.BOLD_MAGENTA}Locked in Orders: {locked_quantity:.8f} {BASE}{Colors.ENDC}")
+            logger.info(f"{Colors.BOLD_MAGENTA}Total (Balance + Locked): {total_quantity:.8f} {BASE}{Colors.ENDC}")
+            logger.info(f"{Colors.BOLD_YELLOW}Target: {TARGET_QUANTITY:.8f} {BASE}{Colors.ENDC}")
+            logger.info(f"{Colors.BOLD_YELLOW}Remaining: {remaining:.8f} {BASE}{Colors.ENDC}")
+            logger.info(f"{Colors.BOLD_GREEN}Session Average Entry: {avg_price:.8f} {QUOTE}{Colors.ENDC}")
+            logger.info(f"{Colors.BOLD_MAGENTA}Session Total Cost: {total_cost:.8f} {QUOTE}{Colors.ENDC}")
+            logger.info(f"{Colors.BOLD_MAGENTA}Session Trades Count: {len(self._session_trades)}{Colors.ENDC}")
             
             # Get current price for remaining cost calculation
             orderbook = self.api.get_orderbook(TRADING_PAIR)
@@ -540,12 +560,12 @@ class TradingMonitor:
                 current_price = float(orderbook['asks'][0][0])
                 if remaining != 0:
                     remaining_cost = (QUOTE_PRICE * TARGET_QUANTITY - avg_price) / remaining
-                    logger.info(f"\n{Colors.BOLD_RED}Remaining Cost: {remaining_cost:.8f} {QUOTE}{Colors.ENDC}")
+                    logger.info(f"{Colors.BOLD_RED}Remaining Cost: {remaining_cost:.8f} {QUOTE}{Colors.ENDC}")
             
             # Log open orders
             open_orders = self.api.get_open_orders(TRADING_PAIR)
             if open_orders:
-                logger.info(f"\n{Colors.PINK}Open Orders:{Colors.ENDC}")
+                logger.info(f"{Colors.PINK}Open Orders:{Colors.ENDC}")
                 for order in open_orders:
                     logger.info(f"  {order['side']} {order['origQty']} {BASE} @ {order['price']} {QUOTE}")
                     
@@ -652,6 +672,42 @@ class TradingMonitor:
                         
         except Exception as e:
             logger.error(f"{Colors.RED}Error handling user update: {e}{Colors.ENDC}")
+
+    def _strategy_config_watcher(self):
+        """Background thread to reload config_strategies.py every 10 seconds and start/stop strategies accordingly."""
+        while self.running:
+            try:
+                spec = importlib.util.spec_from_file_location("config_strategies", "config_strategies.py")
+                if spec is not None and spec.loader is not None:
+                    config_strategies = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(config_strategies)
+                    for name, strategy_class in [
+                        ("shadow_bid", ShadowBidStrategy),
+                        ("cooldown_taker", CooldownTakerStrategy),
+                        ("big_fish", BigFishStrategy)
+                    ]:
+                        enabled = getattr(config_strategies, name.upper(), False)
+                        is_running = name in self.strategies
+                        logger.info(f"[Config] {name}: enabled={enabled}, is_running={is_running}")
+                        if enabled and not is_running:
+                            logger.info(f"[Config] Enabling {name} strategy (creating and starting thread)...")
+                            try:
+                                self.strategies[name] = strategy_class(self.api, self)
+                                self._start_strategy(name)
+                                logger.info(f"[Config] {name} strategy started.")
+                            except Exception as e:
+                                logger.error(f"[Config] Error starting {name} strategy: {e}")
+                        elif not enabled and is_running:
+                            logger.info(f"[Config] Disabling {name} strategy (stopping and deleting)...")
+                            try:
+                                self._stop_strategy(name)
+                                del self.strategies[name]
+                                logger.info(f"[Config] {name} strategy stopped and deleted.")
+                            except Exception as e:
+                                logger.error(f"[Config] Error stopping {name} strategy: {e}")
+            except Exception as e:
+                logger.error(f"Error reloading config_strategies.py: {e}")
+            time.sleep(10)
 
 def main():
     """Main entry point."""

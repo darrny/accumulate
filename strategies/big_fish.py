@@ -152,7 +152,7 @@ class BigFishStrategy(BaseStrategy):
             order = self.api.place_limit_order(
                 pair=TRADING_PAIR,
                 price=price,
-                quantity=quantity,
+                quantity=self.round_quantity(quantity),
                 side='BUY'
             )
             

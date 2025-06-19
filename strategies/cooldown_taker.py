@@ -98,7 +98,7 @@ class CooldownTakerStrategy(BaseStrategy):
             # Place market order
             order = self.api.place_market_order(
                 pair=TRADING_PAIR,
-                quantity=quantity,
+                quantity=self.round_quantity(quantity),
                 side='BUY'
             )
             

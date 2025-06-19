@@ -93,7 +93,7 @@ class ShadowBidStrategy(BaseStrategy):
             order = self.api.place_limit_order(
                 pair=TRADING_PAIR,
                 price=price,
-                quantity=quantity,
+                quantity=self.round_quantity(quantity),
                 side='BUY',
                 post_only=True
             )
@@ -164,7 +164,7 @@ class ShadowBidStrategy(BaseStrategy):
             order = self.api.place_limit_order(
                 pair=TRADING_PAIR,
                 price=rounded_price,
-                quantity=quantity,
+                quantity=self.round_quantity(quantity),
                 side='BUY',
                 post_only=True  # We want to be a maker
             )

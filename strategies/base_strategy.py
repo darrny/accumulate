@@ -4,6 +4,7 @@ import logging
 from utils.binance_api import BinanceAPI
 from config import TRADING_PAIR, TARGET_QUANTITY, BASE, QUOTE
 from utils.colors import Colors
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +98,12 @@ class BaseStrategy(ABC):
         return self._trading_pair_info
         
     def round_quantity(self, quantity: float) -> float:
-        """Round quantity to appropriate decimal places."""
-        if self._quantity_precision is None:
+        """Round quantity down to the nearest valid step size and precision."""
+        if self._step_size is None or self._quantity_precision is None:
             self._get_trading_pair_info()
-        return round(quantity, self._quantity_precision) if self._quantity_precision is not None else quantity
+        step = self._step_size if self._step_size else 1
+        floored = math.floor(quantity / step) * step
+        return round(floored, self._quantity_precision) if self._quantity_precision is not None else floored
         
     def round_price(self, price: float) -> float:
         """Round price to appropriate decimal places."""

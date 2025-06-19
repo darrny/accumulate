@@ -12,7 +12,7 @@ from binance import ThreadedWebsocketManager
 from binance import AsyncClient, BinanceSocketManager
 from utils.binance_api import BinanceAPI
 from utils.colors import Colors, STRATEGY_COLORS
-from config import TRADING_PAIR, SHADOW_BID, COOLDOWN_TAKER, BIG_FISH, TARGET_QUANTITY, BINANCE_API_KEY, BINANCE_API_SECRET, USE_TESTNET, BASE, QUOTE
+from config import TRADING_PAIR, SHADOW_BID, COOLDOWN_TAKER, BIG_FISH, TARGET_QUANTITY, BINANCE_API_KEY, BINANCE_API_SECRET, USE_TESTNET, BASE, QUOTE, QUOTE_PRICE
 from strategies.shadow_bid import ShadowBidStrategy
 from strategies.cooldown_taker import CooldownTakerStrategy
 from strategies.big_fish import BigFishStrategy
@@ -249,15 +249,7 @@ class TradingMonitor:
                 
             # Calculate session acquired amount
             session_acquired = current_quantity - self._session_start_quantity
-            total_quantity = current_quantity + locked_quantity
-            remaining = max(0, self.target_quantity - session_acquired)
-            
-            # Calculate remaining cost based on session average price
-            remaining_cost = remaining * self._session_average_price if self._session_average_price > 0 else 0
-            
-            logger.info(f"{Colors.BOLD}{Colors.MAGENTA}Progress: {session_acquired:.8f} / {self.target_quantity:.8f} {self.base} (Remaining: {remaining:.8f} {self.base}){Colors.ENDC}")
-            logger.info(f"{Colors.BOLD}{Colors.MAGENTA}Session Average Entry: {self._session_average_price:.8f} {self.quote} (Remaining Cost: {remaining_cost:.8f} {self.quote}){Colors.ENDC}")
-            
+
             return session_acquired >= self.target_quantity
             
         except Exception as e:
@@ -424,12 +416,17 @@ class TradingMonitor:
         logger.info("Stopping trading monitor...")
         
         try:
+            # Recalculate session stats from trades to ensure accuracy
+            if self._session_trades:
+                self._session_total_cost = sum(trade['cost'] for trade in self._session_trades)
+                total_qty = sum(trade['qty'] for trade in self._session_trades)
+                self._session_average_price = self._session_total_cost / total_qty if total_qty > 0 else 0
+
             # Show final summary if target was reached
-            if self._session_acquired_quantity >= TARGET_QUANTITY:
-                logger.info(f"\n{Colors.GREEN}=== TARGET REACHED! ==={Colors.ENDC}")
-                logger.info(f"{Colors.GREEN}Successfully accumulated {self._session_acquired_quantity:.8f} {BASE}{Colors.ENDC}")
-                logger.info(f"{Colors.GREEN}Average Entry Price: {self._session_average_price:.8f} {QUOTE}{Colors.ENDC}")
-                logger.info(f"{Colors.GREEN}Total Cost: {self._session_total_cost:.8f} {QUOTE}{Colors.ENDC}")
+            logger.info(f"{Colors.GREEN}=== SESSION SUMMARY ==={Colors.ENDC}")
+            logger.info(f"{Colors.GREEN}Successfully accumulated {self._session_acquired_quantity:.8f} {BASE}{Colors.ENDC}")
+            logger.info(f"{Colors.GREEN}Average Entry Price: {self._session_average_price:.8f} {QUOTE}{Colors.ENDC}")
+            logger.info(f"{Colors.GREEN}Total Cost: {self._session_total_cost:.8f} {QUOTE}{Colors.ENDC}")
             
             # Cancel all open orders first
             try:
@@ -521,30 +518,34 @@ class TradingMonitor:
                 total_cost = 0.0
                 avg_price = 0.0
                 
-            # Log progress
-            logger.info(f"\n{Colors.BOLD}=== Current Status ==={Colors.ENDC}")
-            logger.info(f"{Colors.BOLD}Session Start Balance: {self._session_start_quantity:.8f} {BASE}{Colors.ENDC}")
-            logger.info(f"{Colors.BOLD}Current Balance: {current_quantity:.8f} {BASE}{Colors.ENDC}")
-            logger.info(f"{Colors.BOLD}Session Acquired: {session_acquired:.8f} {BASE}{Colors.ENDC}")
-            logger.info(f"{Colors.BOLD}Locked in Orders: {locked_quantity:.8f} {BASE}{Colors.ENDC}")
-            logger.info(f"{Colors.BOLD}Total (Balance + Locked): {total_quantity:.8f} {BASE}{Colors.ENDC}")
-            logger.info(f"{Colors.BOLD}Target: {TARGET_QUANTITY:.8f} {BASE}{Colors.ENDC}")
-            logger.info(f"{Colors.BOLD}Remaining: {remaining:.8f} {BASE}{Colors.ENDC}")
-            logger.info(f"{Colors.BOLD}Session Average Entry: {avg_price:.8f} {QUOTE}{Colors.ENDC}")
-            logger.info(f"{Colors.BOLD}Session Total Cost: {total_cost:.8f} {QUOTE}{Colors.ENDC}")
-            logger.info(f"{Colors.BOLD}Session Trades Count: {len(self._session_trades)}{Colors.ENDC}")
+            log_message = (
+                f"\n{Colors.BOLD_WHITE}=== Current Status ==={Colors.ENDC}\n"
+                f"{Colors.BOLD_MAGENTA}Session Start Balance: {self._session_start_quantity:.8f} {BASE}{Colors.ENDC}\n"
+                f"{Colors.BOLD_MAGENTA}Current Balance: {current_quantity:.8f} {BASE}{Colors.ENDC}\n"
+                f"{Colors.BOLD_GREEN}Session Acquired: {session_acquired:.8f} {BASE}{Colors.ENDC}\n"
+                f"{Colors.BOLD_MAGENTA}Locked in Orders: {locked_quantity:.8f} {BASE}{Colors.ENDC}\n"
+                f"{Colors.BOLD_MAGENTA}Total (Balance + Locked): {total_quantity:.8f} {BASE}{Colors.ENDC}\n"
+                f"{Colors.BOLD_YELLOW}Target: {TARGET_QUANTITY:.8f} {BASE}{Colors.ENDC}\n"
+                f"{Colors.BOLD_YELLOW}Remaining: {remaining:.8f} {BASE}{Colors.ENDC}\n"
+                f"{Colors.BOLD_GREEN}Session Average Entry: {avg_price:.8f} {QUOTE}{Colors.ENDC}\n"
+                f"{Colors.BOLD_MAGENTA}Session Total Cost: {total_cost:.8f} {QUOTE}{Colors.ENDC}\n"
+                f"{Colors.BOLD_MAGENTA}Session Trades Count: {len(self._session_trades)}{Colors.ENDC}"
+            )
+
+            logger.info(log_message)
             
             # Get current price for remaining cost calculation
             orderbook = self.api.get_orderbook(TRADING_PAIR)
             if orderbook and orderbook['asks']:
                 current_price = float(orderbook['asks'][0][0])
-                remaining_cost = remaining * current_price
-                logger.info(f"{Colors.BOLD}Remaining Cost: {remaining_cost:.8f} {QUOTE}{Colors.ENDC}")
+                if remaining != 0:
+                    remaining_cost = (QUOTE_PRICE * TARGET_QUANTITY - avg_price) / remaining
+                    logger.info(f"\n{Colors.BOLD_RED}Remaining Cost: {remaining_cost:.8f} {QUOTE}{Colors.ENDC}")
             
             # Log open orders
             open_orders = self.api.get_open_orders(TRADING_PAIR)
             if open_orders:
-                logger.info(f"\n{Colors.BOLD}Open Orders:{Colors.ENDC}")
+                logger.info(f"\n{Colors.PINK}Open Orders:{Colors.ENDC}")
                 for order in open_orders:
                     logger.info(f"  {order['side']} {order['origQty']} {BASE} @ {order['price']} {QUOTE}")
                     
@@ -554,37 +555,38 @@ class TradingMonitor:
     def _log_trade_summary(self) -> None:
         """Log a summary of all trades in this session."""
         try:
-            if not self._session_trades:
-                logger.info("\n=== Trade Summary ===")
-                logger.info("No trades executed in this session")
-                return
+            return
+            # if not self._session_trades:
+            #     logger.info("\n=== Trade Summary ===")
+            #     logger.info("No trades executed in this session")
+            #     return
                 
-            total_trades = len(self._session_trades)
-            total_quantity = sum(trade['qty'] for trade in self._session_trades)
-            total_cost = sum(trade['cost'] for trade in self._session_trades)
-            avg_price = total_cost / total_quantity if total_quantity > 0 else 0
+            # total_trades = len(self._session_trades)
+            # total_quantity = sum(trade['qty'] for trade in self._session_trades)
+            # total_cost = sum(trade['cost'] for trade in self._session_trades)
+            # avg_price = total_cost / total_quantity if total_quantity > 0 else 0
             
-            logger.info("\n=== Trade Summary ===")
-            logger.info(f"Total Trades: {total_trades}")
-            logger.info(f"Total Quantity: {total_quantity:.8f} {BASE}")
-            logger.info(f"Total Cost: {total_cost:.8f} {QUOTE}")
-            logger.info(f"Weighted Average Entry: {avg_price:.8f} {QUOTE}")
+            # logger.info("\n=== Trade Summary ===")
+            # logger.info(f"Total Trades: {total_trades}")
+            # logger.info(f"Total Quantity: {total_quantity:.8f} {BASE}")
+            # logger.info(f"Total Cost: {total_cost:.8f} {QUOTE}")
+            # logger.info(f"Weighted Average Entry: {avg_price:.8f} {QUOTE}")
             
-            logger.info("\nTrade Breakdown:")
-            for trade in self._session_trades:
-                trade_time = datetime.fromtimestamp(trade['time']/1000)
-                quantity = trade['qty']
-                price = trade['price']
-                cost = trade['cost']
-                logger.info(f"  {trade_time} - Quantity: {quantity:.8f} {BASE}, Price: {price:.8f} {QUOTE}, Cost: {cost:.8f} {QUOTE}")
+            # logger.info("\nTrade Breakdown:")
+            # for trade in self._session_trades:
+            #     trade_time = datetime.fromtimestamp(trade['time']/1000)
+            #     quantity = trade['qty']
+            #     price = trade['price']
+            #     cost = trade['cost']
+            #     logger.info(f"  {trade_time} - Quantity: {quantity:.8f} {BASE}, Price: {price:.8f} {QUOTE}, Cost: {cost:.8f} {QUOTE}")
             
-            logger.info("\nFinal Statistics:")
-            logger.info(f"  Average Trade Size: {total_quantity/total_trades:.8f} {BASE}")
-            logger.info(f"  Total Value: {total_cost:.8f} {QUOTE}")
-            logger.info(f"  Average Entry Price: {avg_price:.8f} {QUOTE}")
+            # logger.info("\nFinal Statistics:")
+            # logger.info(f"  Average Trade Size: {total_quantity/total_trades:.8f} {BASE}")
+            # logger.info(f"  Total Value: {total_cost:.8f} {QUOTE}")
+            # logger.info(f"  Average Entry Price: {avg_price:.8f} {QUOTE}")
             
         except Exception as e:
-            logger.error(f"Error logging trade summary: {e}")
+            return
 
     def get_remaining_quantity(self) -> float:
         """Get remaining quantity to acquire."""
@@ -671,6 +673,6 @@ def main():
         if monitor:
             monitor.stop()
         logger.info("Program terminated.")
-
+        
 if __name__ == "__main__":
     main()

@@ -44,10 +44,27 @@ MAX_PRICE = 7.70
 QUOTE_PRICE = 7.85182
 TARGET_QUANTITY = 100
 
-# Strategy configs (see file for details)
-SHADOW_BID = {...}
-COOLDOWN_TAKER = {...}
-BIG_FISH = {...}
+# Strategy Configurations
+SHADOW_BID = {
+    'cooldown_time': 16,  # Base time (in seconds) to wait between placing orders
+    'jitter': 3,  # Random time (in seconds) to add/subtract from cooldown for randomization
+    'price_multiplier': 0,  # How far below best bid to place our order (0 = same price)
+    'order_size_percentage': 0.01,  # Order size as percentage of target (10%)
+}
+
+COOLDOWN_TAKER = {
+    'min_cooldown': 16,  # Minimum time (in seconds) to wait between taking orders
+    'jitter': 3,  # Random time (in seconds) to add/subtract from cooldown for randomization
+    'max_ask1_quantity_percentage': 0.001,  # Maximum quantity in best ask as percentage of remaining target (0.1%)
+    'order_size_percentage': 0.1,  # Order size as percentage of target (10%)
+}
+
+BIG_FISH = {
+    'cooldown_time': 16,  # Base time (in seconds) to wait between analyzing orderbook
+    'jitter': 3,  # Random time (in seconds) to add/subtract from cooldown for randomization
+    'min_volume_percentage': 0.05,  # Minimum volume as percentage of target (5%)
+    'max_orders_to_analyze': 20,  # How many orders deep to look in the orderbook for big fish
+}
 ```
 
 ### 2. `config_strategies.py`
